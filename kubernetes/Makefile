@@ -428,14 +428,14 @@ helm-lint: ## Lint the Helm chart
 .PHONY: helm-template
 helm-template: ## Generate Kubernetes manifests from Helm chart
 	@echo "Generating manifests from Helm chart..."
-	helm template opensandbox $(HELM_CHART_PATH) \
+	helm template opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
 		--set controller.image.tag=v$(VERSION)
 
 .PHONY: helm-template-debug
 helm-template-debug: ## Generate Kubernetes manifests with debug output
 	@echo "Generating manifests from Helm chart with debug..."
-	helm template opensandbox $(HELM_CHART_PATH) \
+	helm template opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
 		--set controller.image.tag=v$(VERSION) \
 		--debug
@@ -449,7 +449,7 @@ helm-package: ## Package the Helm chart
 .PHONY: helm-install
 helm-install: ## Install the Helm chart
 	@echo "Installing Helm chart..."
-	helm install opensandbox $(HELM_CHART_PATH) \
+	helm install opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
 		--set controller.image.tag=v$(VERSION) \
 		--namespace opensandbox-system \
@@ -458,7 +458,7 @@ helm-install: ## Install the Helm chart
 .PHONY: helm-upgrade
 helm-upgrade: ## Upgrade the Helm chart
 	@echo "Upgrading Helm chart..."
-	helm upgrade opensandbox $(HELM_CHART_PATH) \
+	helm upgrade opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
 		--set controller.image.tag=v$(VERSION) \
 		--namespace opensandbox-system
@@ -466,12 +466,12 @@ helm-upgrade: ## Upgrade the Helm chart
 .PHONY: helm-uninstall
 helm-uninstall: ## Uninstall the Helm chart
 	@echo "Uninstalling Helm chart..."
-	helm uninstall opensandbox --namespace opensandbox-system
+	helm uninstall opensandbox-controller --namespace opensandbox-system
 
 .PHONY: helm-test
 helm-test: ## Run Helm chart tests
 	@echo "Running Helm chart tests..."
-	helm test opensandbox --namespace opensandbox-system
+	helm test opensandbox-controller --namespace opensandbox-system
 
 .PHONY: helm-docs
 helm-docs: ## Generate Helm chart documentation (requires helm-docs)
@@ -486,7 +486,7 @@ helm-docs: ## Generate Helm chart documentation (requires helm-docs)
 .PHONY: helm-dry-run
 helm-dry-run: ## Perform a dry-run install of the Helm chart
 	@echo "Performing dry-run installation..."
-	helm install opensandbox $(HELM_CHART_PATH) \
+	helm install opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
 		--set controller.image.tag=v$(VERSION) \
 		--namespace opensandbox-system \

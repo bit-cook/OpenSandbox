@@ -19,10 +19,10 @@ This chart bootstraps an OpenSandbox Controller deployment on a Kubernetes clust
 
 ## Installing the Chart
 
-To install the chart with the release name `opensandbox`:
+To install the chart with the release name `opensandbox-controller`:
 
 ```bash
-helm install opensandbox ./opensandbox-controller \
+helm install opensandbox-controller ./opensandbox-controller \
   --set controller.image.repository=<your-registry>/opensandbox-controller \
   --set controller.image.tag=v0.1.0 \
   --namespace opensandbox-system \
@@ -33,10 +33,10 @@ The command deploys OpenSandbox Controller on the Kubernetes cluster with defaul
 
 ## Uninstalling the Chart
 
-To uninstall/delete the `opensandbox` deployment:
+To uninstall/delete the `opensandbox-controller` deployment:
 
 ```bash
-helm delete opensandbox -n opensandbox-system
+helm delete opensandbox-controller -n opensandbox-system
 ```
 
 The command removes all the Kubernetes components associated with the chart. Note that CRDs are kept by default (can be changed via `crds.keep`).
@@ -190,7 +190,7 @@ spec:
 To upgrade the chart:
 
 ```bash
-helm upgrade opensandbox ./opensandbox-controller \
+helm upgrade opensandbox-controller ./opensandbox-controller \
   --namespace opensandbox-system \
   -f custom-values.yaml
 ```
