@@ -240,6 +240,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             },
         )
 
+    @staticmethod
     def _normalize_create_status(status_info: Dict[str, Any]) -> Dict[str, Any]:
         if status_info.get("state") != "Allocated":
             return status_info
