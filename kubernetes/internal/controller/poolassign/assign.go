@@ -12,9 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package strategy
+package assign
 
-type PoolStrategy interface {
-	IsPooledMode() bool
-	AssignProfile() string
+import (
+	"context"
+
+	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+)
+
+type Predicate interface {
+	Predicate(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool
+}
+
+type Scorer interface {
+	Score(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) float64
+}
+
+type Assigner interface {
+	AssignPool(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pools []*sandboxv1alpha1.Pool) (string, error)
 }

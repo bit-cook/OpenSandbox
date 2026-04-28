@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package strategy
+package assign
 
-type PoolStrategy interface {
-	IsPooledMode() bool
-	AssignProfile() string
+func init() {
+	registerPredicate("image", newImagePredicate)
+	registerPredicate("resource", newResourcePredicate)
+	registerPredicate("nodeselector", newNodeSelectorPredicate)
+	registerPredicate("labelselector", newLabelSelectorPredicate)
+
+	registerScorer("resbalance", newResBalanceScorer)
 }
