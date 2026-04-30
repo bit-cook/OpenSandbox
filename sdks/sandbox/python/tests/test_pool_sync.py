@@ -5,6 +5,7 @@ import time
 from datetime import timedelta
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
@@ -84,7 +85,50 @@ def test_start_warms_idle_and_resize_zero_shrinks() -> None:
         pool.shutdown(False)
 
 
-def test_graceful_shutdown_is_bounded_by_drain_timeout_during_warmup() -> None:
+def test_start_overwrites_shared_max_idle_with_user_config() -> None:
+    store = SharedMaxIdleStore(initial_max_idle=0)
+    pool = _create_pool(max_idle=3, store=store)
+    pool.start()
+
+    try:
+        assert store.max_idle_by_pool["pool"] == 3
+        assert store.set_max_idle_calls == [("pool", 3)]
+        assert pool.snapshot().max_idle == 3
+    finally:
+        pool.shutdown(False)
+
+
+def test_resize_only_updates_target_without_immediate_reconcile_trigger() -> None:
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        reconcile_interval=timedelta(seconds=10),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=FakeSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    calls = 0
+
+    def record_reconcile() -> None:
+        nonlocal calls
+        calls += 1
+
+    pool._run_reconcile_tick = record_reconcile  # type: ignore[method-assign]
+    try:
+        pool.resize(1)
+        time.sleep(0.05)
+
+        assert calls == 0
+        assert pool.snapshot().max_idle == 1
+    finally:
+        pool.shutdown(False)
+
+
+def test_graceful_shutdown_waits_for_running_warmup_before_stop() -> None:
     FakeSandbox.reset()
     entered_preparer = threading.Event()
     release_preparer = threading.Event()
@@ -112,14 +156,76 @@ def test_graceful_shutdown_is_bounded_by_drain_timeout_during_warmup() -> None:
     try:
         assert entered_preparer.wait(timeout=2)
 
+        def release_after_delay() -> None:
+            time.sleep(0.05)
+            release_preparer.set()
+
+        release_thread = threading.Thread(target=release_after_delay)
+        release_thread.start()
         started = time.monotonic()
         pool.shutdown(graceful=True)
         elapsed = time.monotonic() - started
+        release_thread.join(timeout=1)
 
-        assert elapsed < 1.0
+        assert elapsed >= 0.04
         assert pool.snapshot().lifecycle_state.value == "STOPPED"
     finally:
         release_preparer.set()
+        pool.shutdown(False)
+
+
+def test_graceful_shutdown_restart_does_not_reuse_stop_event() -> None:
+    pool = _create_pool(max_idle=0)
+    pool.start()
+    first_stop_event = pool._stop_event
+
+    try:
+        pool.shutdown(graceful=True)
+        assert first_stop_event.is_set()
+
+        pool.start()
+
+        assert pool._stop_event is not first_stop_event
+        assert first_stop_event.is_set()
+    finally:
+        pool.shutdown(False)
+
+
+def test_user_managed_transport_is_preserved_for_pool_resources() -> None:
+    transport = _SyncTransport()
+    connection_config = ConnectionConfigSync(transport=transport)
+    manager_configs: list[ConnectionConfigSync] = []
+    sandbox_configs: list[ConnectionConfigSync] = []
+
+    class CapturingSandbox(FakeSandbox):
+        @classmethod
+        def create(cls, *args: Any, **kwargs: Any) -> CapturingSandbox:
+            sandbox_configs.append(kwargs["connection_config"])
+            return cls("created-with-custom-transport")
+
+    def manager_factory(config: ConnectionConfigSync) -> FakeManager:
+        manager_configs.append(config)
+        return FakeManager()
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=connection_config,
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=manager_factory,  # type: ignore[arg-type,return-value]
+        sandbox_factory=CapturingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        pool.acquire()
+
+        assert manager_configs[0].transport is transport
+        assert not manager_configs[0]._owns_transport
+        assert sandbox_configs[0].transport is transport
+        assert not sandbox_configs[0]._owns_transport
+    finally:
         pool.shutdown(False)
 
 
@@ -198,3 +304,24 @@ class FakeSandbox:
 
     def close(self) -> None:
         self.closed = True
+
+
+class SharedMaxIdleStore(InMemoryPoolStateStore):
+    def __init__(self, initial_max_idle: int | None = None) -> None:
+        super().__init__()
+        self.max_idle_by_pool: dict[str, int] = {}
+        self.set_max_idle_calls: list[tuple[str, int]] = []
+        if initial_max_idle is not None:
+            self.max_idle_by_pool["pool"] = initial_max_idle
+
+    def get_max_idle(self, pool_name: str) -> int | None:
+        return self.max_idle_by_pool.get(pool_name)
+
+    def set_max_idle(self, pool_name: str, max_idle: int) -> None:
+        self.set_max_idle_calls.append((pool_name, max_idle))
+        self.max_idle_by_pool[pool_name] = max_idle
+
+
+class _SyncTransport(httpx.BaseTransport):
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request)

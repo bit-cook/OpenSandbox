@@ -1,34 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import uuid
-from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
+from test_redis_pool_store import _FakeRedis
 
 from opensandbox.exceptions import PoolStateStoreUnavailableException
 from opensandbox.pool import AsyncRedisPoolStateStore
 
 
 @pytest.fixture()
-async def async_redis_store() -> AsyncIterator[tuple[AsyncRedisPoolStateStore, Any, str]]:
-    redis_url = os.getenv("OPENSANDBOX_TEST_REDIS_URL")
-    if not redis_url:
-        pytest.skip("Set OPENSANDBOX_TEST_REDIS_URL to run AsyncRedisPoolStateStore tests")
-
-    redis_module = pytest.importorskip("redis.asyncio")
-    redis_client = redis_module.Redis.from_url(redis_url)
-    key_prefix = f"opensandbox:test:{uuid.uuid4()}"
+async def async_redis_store() -> tuple[AsyncRedisPoolStateStore, Any, str]:
+    redis_client = _FakeAsyncRedis()
+    key_prefix = "opensandbox:test:async"
     store = AsyncRedisPoolStateStore(redis_client, key_prefix=key_prefix)
-    try:
-        yield store, redis_client, key_prefix
-    finally:
-        async for key in redis_client.scan_iter(f"{key_prefix}:*"):
-            await redis_client.delete(key)
-        await redis_client.aclose()
+    return store, redis_client, key_prefix
 
 
 @pytest.mark.asyncio
@@ -123,3 +111,39 @@ async def test_async_redis_store_wraps_client_failures() -> None:
 class _BrokenAsyncRedis:
     async def get(self, key: str) -> str | None:
         raise RuntimeError("redis unavailable")
+
+
+class _FakeAsyncRedis:
+    def __init__(self) -> None:
+        self._sync = _FakeRedis()
+
+    async def eval(self, script: str, numkeys: int, *args: str) -> str | int | None:
+        return self._sync.eval(script, numkeys, *args)
+
+    async def get(self, key: str) -> str | None:
+        return self._sync.get(key)
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        nx: bool = False,
+        px: int | None = None,
+    ) -> bool:
+        return self._sync.set(key, value, nx=nx, px=px)
+
+    async def hdel(self, key: str, field: str) -> int:
+        return self._sync.hdel(key, field)
+
+    async def lrem(self, key: str, count: int, value: str) -> int:
+        return self._sync.lrem(key, count, value)
+
+    async def hlen(self, key: str) -> int:
+        return self._sync.hlen(key)
+
+    async def lrange(self, key: str, start: int, stop: int) -> list[str]:
+        return self._sync.lrange(key, start, stop)
+
+    async def hgetall(self, key: str) -> dict[str, str]:
+        return self._sync.hgetall(key)

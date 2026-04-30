@@ -45,6 +45,8 @@ from opensandbox.sync.sandbox import SandboxSync
 
 logger = logging.getLogger(__name__)
 
+_WARMUP_TERMINATION_TIMEOUT_SECONDS = 5.0
+
 
 class SandboxPoolSync:
     """Client-side synchronous sandbox pool aligned with Kotlin SandboxPool."""
@@ -132,17 +134,18 @@ class SandboxPoolSync:
                 self._state_store.set_idle_entry_ttl(
                     self._config.pool_name, self._config.idle_timeout
                 )
-                if self._state_store.get_max_idle(self._config.pool_name) is None:
-                    self._state_store.set_max_idle(
-                        self._config.pool_name, self._config.max_idle
-                    )
+                self._state_store.set_max_idle(
+                    self._config.pool_name, self._config.max_idle
+                )
                 self._warmup_executor = ThreadPoolExecutor(
                     max_workers=max(1, int(self._config.warmup_concurrency or 1)),
                     thread_name_prefix=f"sandbox-pool-warmup-{self._config.pool_name}",
                 )
-                self._stop_event.clear()
+                stop_event = threading.Event()
+                self._stop_event = stop_event
                 self._scheduler_thread = threading.Thread(
                     target=self._run_scheduler,
+                    args=(stop_event,),
                     name=f"sandbox-pool-reconcile-{self._config.pool_name}",
                     daemon=True,
                 )
@@ -177,7 +180,7 @@ class SandboxPoolSync:
                 try:
                     sandbox = self._sandbox_factory.connect(
                         sandbox_id,
-                        connection_config=self._connection_without_transport(),
+                        connection_config=self._connection_for_pool_resource(),
                         health_check=self._config.acquire_health_check,
                         connect_timeout=self._config.acquire_ready_timeout,
                         health_check_polling_interval=(
@@ -222,12 +225,6 @@ class SandboxPoolSync:
             raise ValueError("max_idle must be >= 0")
         self._state_store.set_max_idle(self._config.pool_name, max_idle)
         self._current_max_idle = max_idle
-        if self._lifecycle_state == PoolLifecycleState.RUNNING:
-            threading.Thread(
-                target=self._run_reconcile_tick,
-                name=f"sandbox-pool-resize-{self._config.pool_name}",
-                daemon=True,
-            ).start()
 
     def release_all_idle(self) -> int:
         pool_name = self._config.pool_name
@@ -293,7 +290,7 @@ class SandboxPoolSync:
                 self._close_provider()
                 return
             self._lifecycle_state = PoolLifecycleState.DRAINING
-            self._stop_reconcile(wait_for_warmup=False, join_scheduler=False)
+            self._stop_reconcile(wait_for_warmup=False)
         drained = self._await_in_flight_drain(self._config.drain_timeout)
         if not drained:
             logger.warning(
@@ -306,13 +303,13 @@ class SandboxPoolSync:
             self._lifecycle_state = PoolLifecycleState.STOPPED
             self._close_provider()
 
-    def _run_scheduler(self) -> None:
+    def _run_scheduler(self, stop_event: threading.Event) -> None:
         initial_delay = 0 if self._config.max_idle > 0 else self._config.reconcile_interval.total_seconds()
-        if initial_delay > 0 and self._stop_event.wait(initial_delay):
+        if initial_delay > 0 and stop_event.wait(initial_delay):
             return
-        while not self._stop_event.is_set():
+        while not stop_event.is_set():
             self._run_reconcile_tick()
-            if self._stop_event.wait(self._config.reconcile_interval.total_seconds()):
+            if stop_event.wait(self._config.reconcile_interval.total_seconds()):
                 break
 
     def _run_reconcile_tick(self) -> None:
@@ -387,7 +384,7 @@ class SandboxPoolSync:
             secure_access=spec.secure_access,
             entrypoint=spec.entrypoint,
             volumes=spec.volumes,
-            connection_config=self._connection_without_transport(),
+            connection_config=self._connection_for_pool_resource(),
             health_check=self._config.warmup_health_check,
             health_check_polling_interval=self._config.warmup_health_check_polling_interval,
             skip_health_check=self._config.warmup_skip_health_check,
@@ -407,7 +404,7 @@ class SandboxPoolSync:
             secure_access=spec.secure_access,
             entrypoint=spec.entrypoint,
             volumes=spec.volumes,
-            connection_config=self._connection_without_transport(),
+            connection_config=self._connection_for_pool_resource(),
             health_check=self._config.acquire_health_check,
             health_check_polling_interval=self._config.acquire_health_check_polling_interval,
             skip_health_check=self._config.acquire_skip_health_check,
@@ -421,9 +418,11 @@ class SandboxPoolSync:
         return self._current_max_idle if shared is None else shared
 
     def _create_sandbox_manager(self) -> SandboxManagerSync:
-        return self._sandbox_manager_factory(self._connection_without_transport())
+        return self._sandbox_manager_factory(self._connection_for_pool_resource())
 
-    def _connection_without_transport(self) -> ConnectionConfigSync:
+    def _connection_for_pool_resource(self) -> ConnectionConfigSync:
+        if self._connection_config.transport is not None and not self._connection_config._owns_transport:
+            return self._connection_config
         config = self._connection_config.model_copy(update={"transport": None})
         config._owns_transport = True
         return config
@@ -475,9 +474,24 @@ class SandboxPoolSync:
             self._scheduler_thread = None
         executor = self._warmup_executor
         if executor is not None:
-            executor.shutdown(wait=wait_for_warmup, cancel_futures=True)
+            executor.shutdown(wait=False, cancel_futures=True)
+            if wait_for_warmup:
+                executor.shutdown(wait=True)
+            else:
+                self._await_executor_threads(executor, _WARMUP_TERMINATION_TIMEOUT_SECONDS)
         self._warmup_executor = None
         self._release_primary_lock_best_effort()
+
+    def _await_executor_threads(
+        self, executor: ThreadPoolExecutor, timeout_seconds: float
+    ) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        threads = list(getattr(executor, "_threads", ()))
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            thread.join(timeout=remaining)
 
     def _release_primary_lock_best_effort(self) -> None:
         try:

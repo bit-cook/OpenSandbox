@@ -21,10 +21,8 @@ import os
 import threading
 import time
 import uuid
-from collections import defaultdict, deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -32,20 +30,19 @@ import pytest
 from opensandbox import SandboxManagerSync, SandboxSync
 from opensandbox.config import ConnectionConfigSync
 from opensandbox.exceptions import (
+    PoolAcquireFailedException,
     PoolEmptyException,
     PoolNotRunningException,
 )
 from opensandbox.models.sandboxes import SandboxFilter
 from opensandbox.pool import (
     AcquirePolicy,
-    IdleEntry,
     InMemoryPoolStateStore,
     PoolCreationSpec,
     PoolState,
     PoolStateStore,
     RedisPoolStateStore,
     SandboxPoolSync,
-    StoreCounters,
 )
 
 from tests.base_e2e_test import (
@@ -156,6 +153,8 @@ class TestSandboxPoolSingleNodeE2ESync:
         with pytest.raises(PoolNotRunningException):
             self.pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
 
+        self.pool.release_all_idle()
+        assert self.pool.snapshot().idle_count == 0
         self.store.put_idle(self.pool_name, f"injected-a-{uuid.uuid4().hex}")
         self.store.put_idle(self.pool_name, f"injected-b-{uuid.uuid4().hex}")
         assert self.pool.release_all_idle() == 2
@@ -165,8 +164,7 @@ class TestSandboxPoolSingleNodeE2ESync:
         _eventually("pool rewarms after restart", lambda: self.pool.snapshot().idle_count >= 1)
 
         self.pool.resize(0)
-        released = self.pool.release_all_idle()
-        assert released >= 1
+        assert self.pool.release_all_idle() >= 0
         _eventually(
             "releaseAllIdle reduces remote tagged sandboxes",
             lambda: self.pool.snapshot().idle_count == 0
@@ -379,172 +377,6 @@ class TestSandboxPoolSingleNodeE2ESync:
             _cleanup_pool(healthy_pool)
             _cleanup_tagged_sandboxes(self.manager, healthy_tag)
 
-
-@pytest.mark.e2e
-class TestSandboxPoolPseudoDistributedE2ESync:
-    """Multiple pool instances sharing a pseudo-distributed state store."""
-
-    def setup_method(self) -> None:
-        self.manager = SandboxManagerSync.create(create_connection_config_sync())
-        self.borrowed: list[SandboxSync] = []
-        self.pools: list[SandboxPoolSync] = []
-        self.tag = _tag("py-pool-dist")
-
-    def teardown_method(self) -> None:
-        _cleanup_borrowed(self.borrowed)
-        for pool in self.pools:
-            _cleanup_pool(pool)
-        _cleanup_tagged_sandboxes(self.manager, self.tag)
-        self.manager.close()
-
-    @pytest.mark.timeout(360)
-    def test_cross_node_acquire_resize_propagation_and_single_writer(self) -> None:
-        pool_name = f"pool-dist-{self.tag}"
-        store = PseudoDistributedPoolStateStore()
-        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store, self.tag, 2)
-        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store, self.tag, 2)
-        self.pools.extend([pool_a, pool_b])
-
-        pool_a.start()
-        pool_b.start()
-        _eventually("distributed pool warms", lambda: pool_a.snapshot().idle_count >= 1)
-
-        sandbox = pool_b.acquire(timedelta(minutes=5), AcquirePolicy.FAIL_FAST)
-        self.borrowed.append(sandbox)
-        assert sandbox.is_healthy()
-        result = sandbox.commands.run("echo py-dist-acquire-ok")
-        assert result.error is None
-
-        _eventually("primary owner established", lambda: store.current_owner(pool_name) is not None)
-        time.sleep(3)
-        put_counts = store.put_counts_by_owner(pool_name)
-        assert len(put_counts) == 1
-        assert store.current_owner(pool_name) in put_counts
-
-        pool_b.resize(0)
-        pool_a.release_all_idle()
-        pool_b.release_all_idle()
-        _eventually("distributed idle drains", lambda: pool_a.snapshot().idle_count == 0)
-        time.sleep(RECONCILE_INTERVAL.total_seconds() * 2)
-        assert pool_a.snapshot().idle_count == 0
-        with pytest.raises(PoolEmptyException):
-            pool_a.acquire(timedelta(minutes=2), AcquirePolicy.FAIL_FAST)
-
-    @pytest.mark.timeout(360)
-    def test_primary_failover_after_leader_shutdown(self) -> None:
-        pool_name = f"pool-failover-{self.tag}"
-        owner_a = f"owner-a-{self.tag}"
-        owner_b = f"owner-b-{self.tag}"
-        store = PseudoDistributedPoolStateStore()
-        pool_a = _create_pool(pool_name, owner_a, store, self.tag, 1)
-        pool_b = _create_pool(pool_name, owner_b, store, self.tag, 1)
-        self.pools.extend([pool_a, pool_b])
-
-        pool_a.start()
-        pool_b.start()
-        _eventually("primary owner established", lambda: store.current_owner(pool_name) is not None)
-        first_owner = store.current_owner(pool_name)
-        assert first_owner in {owner_a, owner_b}
-
-        leader = pool_a if first_owner == owner_a else pool_b
-        expected_next = owner_b if first_owner == owner_a else owner_a
-        leader.shutdown(False)
-
-        _eventually(
-            "primary owner fails over",
-            lambda: store.current_owner(pool_name) == expected_next,
-            timeout=timedelta(seconds=45),
-            interval=timedelta(milliseconds=500),
-        )
-
-    @pytest.mark.timeout(360)
-    def test_lost_lock_window_drops_orphans_and_keeps_remote_count_bounded(self) -> None:
-        pool_name = f"pool-renew-window-{self.tag}"
-        owner = f"owner-a-{self.tag}"
-        store = PseudoDistributedPoolStateStore()
-        store.set_fail_renew_when_put_count_at_least(pool_name, owner, 1)
-        pool = _create_pool(pool_name, owner, store, self.tag, 2)
-        self.pools.append(pool)
-
-        pool.start()
-        _eventually("renew failure leaves one idle", lambda: pool.snapshot().idle_count == 1)
-        time.sleep(3)
-        assert pool.snapshot().idle_count == 1
-        _eventually(
-            "remote count remains bounded after orphan cleanup",
-            lambda: _count_tagged_sandboxes(self.manager, self.tag) <= 2,
-            timeout=timedelta(seconds=45),
-        )
-
-    @pytest.mark.timeout(420)
-    def test_jitter_follower_acquire_and_node_restart_stay_bounded(self) -> None:
-        pool_name = f"pool-jitter-{self.tag}"
-        owner_a = f"owner-a-{self.tag}"
-        owner_b = f"owner-b-{self.tag}"
-        store = PseudoDistributedPoolStateStore()
-        pool_a = _create_pool(pool_name, owner_a, store, self.tag, 1)
-        pool_b = _create_pool(pool_name, owner_b, store, self.tag, 1)
-        self.pools.extend([pool_a, pool_b])
-        pool_a.start()
-        pool_b.start()
-        _eventually("distributed pool warms before jitter", lambda: pool_a.snapshot().idle_count >= 1)
-
-        for i in range(6):
-            pool_a.resize(i % 3)
-            pool_b.resize((i + 1) % 3)
-            time.sleep(0.2)
-        pool_a.resize(1)
-        pool_b.resize(1)
-
-        _eventually(
-            "idle remains bounded after maxIdle jitter",
-            lambda: pool_a.snapshot().idle_count <= 2,
-            timeout=timedelta(seconds=45),
-        )
-        assert _count_tagged_sandboxes(self.manager, self.tag) <= 3
-
-        _eventually(
-            "leader exists before follower acquire",
-            lambda: store.current_owner(pool_name) is not None,
-            timeout=timedelta(seconds=30),
-            interval=timedelta(milliseconds=500),
-        )
-        current_owner = store.current_owner(pool_name)
-        assert current_owner in {owner_a, owner_b}
-        leader = pool_a if current_owner == owner_a else pool_b
-        follower = pool_b if current_owner == owner_a else pool_a
-        expected_next = owner_b if current_owner == owner_a else owner_a
-
-        sandbox = follower.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
-        self.borrowed.append(sandbox)
-        assert sandbox.is_healthy()
-        result = sandbox.commands.run("echo py-follower-acquire-ok")
-        assert result.error is None
-
-        leader.shutdown(False)
-        _eventually(
-            "leadership transfers to follower",
-            lambda: store.current_owner(pool_name) == expected_next,
-            timeout=timedelta(seconds=45),
-            interval=timedelta(milliseconds=500),
-        )
-        leader.start()
-        _eventually(
-            "restarted node reports healthy",
-            lambda: leader.snapshot().state == PoolState.HEALTHY,
-            timeout=timedelta(seconds=45),
-        )
-        restarted = leader.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
-        self.borrowed.append(restarted)
-        assert restarted.is_healthy()
-        _eventually(
-            "restart does not cause runaway idle pollution",
-            lambda: leader.snapshot().idle_count <= 1
-            and _count_tagged_sandboxes(self.manager, self.tag) <= 4,
-            timeout=timedelta(seconds=45),
-        )
-
-
 @pytest.mark.e2e
 class TestSandboxPoolRedisDistributedE2ESync:
     """Redis-backed multi-instance pool E2E scenarios."""
@@ -572,7 +404,7 @@ class TestSandboxPoolRedisDistributedE2ESync:
         self.redis.close()
 
     @pytest.mark.timeout(360)
-    def test_redis_cross_node_acquire_resize_and_failover(self) -> None:
+    def test_redis_cross_node_acquire_shared_resize_and_direct_create(self) -> None:
         pool_name = f"redis-pool-{self.tag}"
         store_a = RedisPoolStateStore(self.redis, self.key_prefix)
         store_b = RedisPoolStateStore(self.redis, self.key_prefix)
@@ -597,11 +429,103 @@ class TestSandboxPoolRedisDistributedE2ESync:
         with pytest.raises(PoolEmptyException):
             pool_a.acquire(timedelta(minutes=2), AcquirePolicy.FAIL_FAST)
 
+        direct = pool_a.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+        self.borrowed.append(direct)
+        assert direct.is_healthy()
+        direct_result = direct.commands.run("echo py-redis-direct-create-ok")
+        assert direct_result.error is None
+        assert pool_a.snapshot().idle_count == 0
+
+    @pytest.mark.timeout(420)
+    def test_redis_primary_failover_restart_and_resize_jitter_stay_bounded(self) -> None:
+        pool_name = f"redis-failover-{self.tag}"
+        owner_a = f"owner-a-{self.tag}"
+        owner_b = f"owner-b-{self.tag}"
+        store_a = RedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = RedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, owner_a, store_a, self.tag, 1)
+        pool_b = _create_pool(pool_name, owner_b, store_b, self.tag, 1)
+        self.pools.extend([pool_a, pool_b])
+        lock_key = store_a._primary_lock_key(pool_name)
+
+        pool_a.start()
+        _eventually(
+            "first Redis node owns primary lock and warms",
+            lambda: self.redis.get(lock_key) == owner_a and pool_a.snapshot().idle_count >= 1,
+        )
+
+        pool_b.start()
         pool_a.shutdown(False)
         pool_b.resize(1)
-        _eventually("remaining Redis node replenishes", lambda: pool_b.snapshot().idle_count >= 1)
-        assert store_b.try_acquire_primary_lock(
-            pool_name, f"owner-b-{self.tag}", PRIMARY_LOCK_TTL
+        _eventually(
+            "primary lock fails over to remaining Redis node",
+            lambda: self.redis.get(lock_key) == owner_b and pool_b.snapshot().idle_count >= 1,
+            timeout=timedelta(seconds=60),
+        )
+
+        pool_a.start()
+        for index in range(6):
+            (pool_a if index % 2 == 0 else pool_b).resize(index % 3)
+            time.sleep(0.2)
+        pool_b.resize(1)
+        _eventually(
+            "Redis restart and resize jitter converge to configured maxIdle",
+            lambda: pool_a.snapshot().idle_count <= 1
+            and _count_tagged_sandboxes(self.manager, self.tag) <= 2,
+            timeout=timedelta(seconds=60),
+        )
+
+    @pytest.mark.timeout(420)
+    def test_redis_start_overwrites_stale_shared_max_idle_after_restart(self) -> None:
+        pool_name = f"redis-restart-config-{self.tag}"
+        store_a = RedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 1)
+        self.pools.append(pool_a)
+
+        pool_a.start()
+        _eventually("initial Redis pool warms", lambda: pool_a.snapshot().idle_count >= 1)
+        pool_a.resize(0)
+        _eventually("initial Redis pool drains to zero", lambda: pool_a.snapshot().idle_count == 0)
+        pool_a.shutdown(False)
+
+        store_b = RedisPoolStateStore(self.redis, self.key_prefix)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 2)
+        self.pools.append(pool_b)
+        pool_b.start()
+
+        _eventually(
+            "restart with same Redis namespace uses new configured max_idle",
+            lambda: pool_b.snapshot().max_idle == 2 and pool_b.snapshot().idle_count >= 2,
+        )
+
+    @pytest.mark.timeout(420)
+    def test_redis_secondary_resize_is_applied_by_primary_periodic_reconcile(self) -> None:
+        pool_name = f"redis-secondary-resize-{self.tag}"
+        owner_a = f"owner-a-{self.tag}"
+        owner_b = f"owner-b-{self.tag}"
+        store_a = RedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = RedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, owner_a, store_a, self.tag, 2)
+        pool_b = _create_pool(pool_name, owner_b, store_b, self.tag, 2)
+        self.pools.extend([pool_a, pool_b])
+        lock_key = store_a._primary_lock_key(pool_name)
+
+        pool_a.start()
+        _eventually(
+            "primary Redis node owns lock and warms",
+            lambda: self.redis.get(lock_key) == owner_a and pool_a.snapshot().idle_count >= 2,
+        )
+        pool_b.start()
+
+        pool_b.resize(0)
+        _eventually(
+            "secondary resize to zero is applied by primary",
+            lambda: self.redis.get(lock_key) == owner_a and pool_a.snapshot().idle_count == 0,
+        )
+        pool_b.resize(2)
+        _eventually(
+            "secondary resize up is applied by primary",
+            lambda: self.redis.get(lock_key) == owner_a and pool_a.snapshot().idle_count >= 2,
         )
 
     @pytest.mark.timeout(360)
@@ -654,6 +578,107 @@ class TestSandboxPoolRedisDistributedE2ESync:
         assert len(taken) == 50
         assert store.snapshot_counters(contention_pool).idle_count == 0
 
+    @pytest.mark.timeout(420)
+    def test_redis_concurrent_acquire_and_resize_jitter_remain_bounded(self) -> None:
+        pool_name = f"redis-acquire-resize-jitter-{self.tag}"
+        store_a = RedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = RedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 2)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 2)
+        self.pools.extend([pool_a, pool_b])
+        pool_a.start()
+        pool_b.start()
+        _eventually("Redis jitter pool warms two idle", lambda: pool_a.snapshot().idle_count >= 2)
+
+        acquired_ids: set[str] = set()
+        acquired_lock = threading.Lock()
+
+        def acquire_once(index: int) -> None:
+            pool = pool_a if index % 2 == 0 else pool_b
+            sandbox = pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+            self.borrowed.append(sandbox)
+            with acquired_lock:
+                assert sandbox.id not in acquired_ids
+                acquired_ids.add(sandbox.id)
+            result = sandbox.commands.run(f"echo py-redis-jitter-{index}")
+            assert result.error is None
+
+        def resize_jitter() -> None:
+            for index in range(8):
+                (pool_a if index % 2 == 0 else pool_b).resize(index % 3)
+                time.sleep(0.2)
+            pool_b.resize(2)
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(acquire_once, i) for i in range(4)]
+            futures.append(executor.submit(resize_jitter))
+            for future in as_completed(futures, timeout=180):
+                future.result()
+
+        assert len(acquired_ids) == 4
+        _eventually(
+            "Redis acquire plus resize jitter converges and stays bounded",
+            lambda: pool_a.snapshot().idle_count <= 2
+            and _count_tagged_sandboxes(self.manager, self.tag) <= 8,
+            timeout=timedelta(seconds=90),
+        )
+
+    @pytest.mark.timeout(360)
+    def test_redis_stale_idle_is_removed_and_direct_create_fallback_works(self) -> None:
+        pool_name = f"redis-stale-{self.tag}"
+        store_a = RedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = RedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 0)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 0)
+        self.pools.extend([pool_a, pool_b])
+        pool_a.start()
+        pool_b.start()
+
+        store_a.put_idle(pool_name, f"missing-{uuid.uuid4().hex}")
+        with pytest.raises(PoolAcquireFailedException):
+            pool_b.acquire(timedelta(seconds=2), AcquirePolicy.FAIL_FAST)
+        assert store_a.snapshot_counters(pool_name).idle_count == 0
+
+        sandbox = pool_b.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+        self.borrowed.append(sandbox)
+        assert sandbox.is_healthy()
+
+    @pytest.mark.timeout(420)
+    def test_redis_lost_lock_window_discards_orphan_and_recovers(self) -> None:
+        pool_name = f"redis-renew-window-{self.tag}"
+        owner = f"owner-a-{self.tag}"
+        store = RedisPoolStateStore(self.redis, self.key_prefix)
+        lock_key = store._primary_lock_key(pool_name)
+        dropped_once = threading.Event()
+
+        def drop_lock_once(_: SandboxSync) -> None:
+            if not dropped_once.is_set():
+                dropped_once.set()
+                self.redis.delete(lock_key)
+
+        pool = _create_pool(
+            pool_name,
+            owner,
+            store,
+            self.tag,
+            1,
+            warmup_sandbox_preparer=drop_lock_once,
+        )
+        self.pools.append(pool)
+
+        pool.start()
+        _eventually(
+            "Redis pool recovers after losing primary lock during warmup",
+            lambda: pool.snapshot().idle_count == 1,
+            timeout=timedelta(seconds=90),
+            interval=timedelta(milliseconds=500),
+        )
+        _eventually(
+            "lost-lock orphan cleanup keeps remote count bounded",
+            lambda: _count_tagged_sandboxes(self.manager, self.tag) == 1,
+            timeout=timedelta(seconds=60),
+        )
+
 
 def _create_pool(
     pool_name: str,
@@ -666,6 +691,8 @@ def _create_pool(
     degraded_threshold: int = 3,
     warmup_ready_timeout: timedelta = timedelta(seconds=30),
     acquire_ready_timeout: timedelta = timedelta(seconds=30),
+    primary_lock_ttl: timedelta = PRIMARY_LOCK_TTL,
+    reconcile_interval: timedelta = RECONCILE_INTERVAL,
 ) -> SandboxPoolSync:
     return SandboxPoolSync(
         pool_name=pool_name,
@@ -685,8 +712,8 @@ def _create_pool(
             },
             resource=get_e2e_sandbox_resource(),
         ),
-        reconcile_interval=RECONCILE_INTERVAL,
-        primary_lock_ttl=PRIMARY_LOCK_TTL,
+        reconcile_interval=reconcile_interval,
+        primary_lock_ttl=primary_lock_ttl,
         drain_timeout=DRAIN_TIMEOUT,
         warmup_sandbox_preparer=warmup_sandbox_preparer,
         degraded_threshold=degraded_threshold,
@@ -755,17 +782,20 @@ def _cleanup_borrowed(sandboxes: list[SandboxSync]) -> None:
 
 
 def _cleanup_tagged_sandboxes(manager: SandboxManagerSync, tag: str) -> None:
-    try:
-        infos = manager.list_sandbox_infos(
-            SandboxFilter(metadata={"tag": tag}, page_size=50)
-        )
-        for info in infos.sandbox_infos:
-            try:
-                manager.kill_sandbox(info.id)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    for _ in range(5):
+        try:
+            infos = manager.list_sandbox_infos(
+                SandboxFilter(metadata={"tag": tag}, page_size=50)
+            )
+            if not infos.sandbox_infos:
+                return
+            for info in infos.sandbox_infos:
+                try:
+                    manager.kill_sandbox(info.id)
+                except Exception:
+                    pass
+        except Exception:
+            return
 
 
 def _count_tagged_sandboxes(manager: SandboxManagerSync, tag: str) -> int:
@@ -775,154 +805,3 @@ def _count_tagged_sandboxes(manager: SandboxManagerSync, tag: str) -> int:
 
 def _tag(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
-
-
-@dataclass
-class _PseudoPoolState:
-    entries: dict[str, IdleEntry] = field(default_factory=dict)
-    queue: deque[str] = field(default_factory=deque)
-
-
-class PseudoDistributedPoolStateStore:
-    """Thread-safe in-process store with real owner/TTL lock semantics."""
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._pools: dict[str, _PseudoPoolState] = defaultdict(_PseudoPoolState)
-        self._max_idle: dict[str, int] = {}
-        self._idle_ttl: dict[str, timedelta] = defaultdict(lambda: timedelta(hours=24))
-        self._owners: dict[str, tuple[str, datetime]] = {}
-        self._put_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        self._fail_renew_after_puts: dict[tuple[str, str], int] = {}
-
-    def try_take_idle(self, pool_name: str) -> str | None:
-        with self._lock:
-            state = self._pools[pool_name]
-            now = _now()
-            while state.queue:
-                sandbox_id = state.queue.popleft()
-                entry = state.entries.pop(sandbox_id, None)
-                if entry is None:
-                    continue
-                if entry.expires_at > now:
-                    return sandbox_id
-            return None
-
-    def put_idle(self, pool_name: str, sandbox_id: str) -> None:
-        if not sandbox_id or not sandbox_id.strip():
-            raise ValueError("sandbox_id must not be blank")
-        with self._lock:
-            state = self._pools[pool_name]
-            owner = self.current_owner(pool_name)
-            if owner is not None:
-                self._put_counts[pool_name][owner] += 1
-            expires_at = _now() + self._idle_ttl[pool_name]
-            if sandbox_id not in state.entries:
-                state.queue.append(sandbox_id)
-            state.entries.setdefault(sandbox_id, IdleEntry(sandbox_id, expires_at))
-
-    def remove_idle(self, pool_name: str, sandbox_id: str) -> None:
-        with self._lock:
-            self._pools[pool_name].entries.pop(sandbox_id, None)
-
-    def try_acquire_primary_lock(
-        self, pool_name: str, owner_id: str, ttl: timedelta
-    ) -> bool:
-        with self._lock:
-            current = self._owners.get(pool_name)
-            now = _now()
-            if current is None or current[1] <= now or current[0] == owner_id:
-                self._owners[pool_name] = (owner_id, now + ttl)
-                return True
-            return False
-
-    def renew_primary_lock(
-        self, pool_name: str, owner_id: str, ttl: timedelta
-    ) -> bool:
-        with self._lock:
-            threshold = self._fail_renew_after_puts.get((pool_name, owner_id))
-            if threshold is not None and self._put_counts[pool_name][owner_id] >= threshold:
-                self._owners.pop(pool_name, None)
-                return False
-            current = self._owners.get(pool_name)
-            now = _now()
-            if current is None or current[0] != owner_id or current[1] <= now:
-                return False
-            self._owners[pool_name] = (owner_id, now + ttl)
-            return True
-
-    def release_primary_lock(self, pool_name: str, owner_id: str) -> None:
-        with self._lock:
-            current = self._owners.get(pool_name)
-            if current is not None and current[0] == owner_id:
-                self._owners.pop(pool_name, None)
-
-    def reap_expired_idle(self, pool_name: str, now: datetime) -> None:
-        with self._lock:
-            state = self._pools[pool_name]
-            expired = [
-                sandbox_id
-                for sandbox_id, entry in state.entries.items()
-                if entry.expires_at <= now
-            ]
-            for sandbox_id in expired:
-                state.entries.pop(sandbox_id, None)
-            if expired:
-                state.queue = deque(
-                    sandbox_id for sandbox_id in state.queue if sandbox_id in state.entries
-                )
-
-    def snapshot_counters(self, pool_name: str) -> StoreCounters:
-        with self._lock:
-            self.reap_expired_idle(pool_name, _now())
-            return StoreCounters(idle_count=len(self._pools[pool_name].entries))
-
-    def snapshot_idle_entries(self, pool_name: str) -> list[IdleEntry]:
-        with self._lock:
-            self.reap_expired_idle(pool_name, _now())
-            state = self._pools[pool_name]
-            return [
-                entry
-                for sandbox_id in state.queue
-                if (entry := state.entries.get(sandbox_id)) is not None
-            ]
-
-    def get_max_idle(self, pool_name: str) -> int | None:
-        with self._lock:
-            return self._max_idle.get(pool_name)
-
-    def set_max_idle(self, pool_name: str, max_idle: int) -> None:
-        if max_idle < 0:
-            raise ValueError("max_idle must be >= 0")
-        with self._lock:
-            self._max_idle[pool_name] = max_idle
-
-    def set_idle_entry_ttl(self, pool_name: str, idle_ttl: timedelta) -> None:
-        if idle_ttl.total_seconds() <= 0:
-            raise ValueError("idle_ttl must be positive")
-        with self._lock:
-            self._idle_ttl[pool_name] = idle_ttl
-
-    def current_owner(self, pool_name: str) -> str | None:
-        with self._lock:
-            current = self._owners.get(pool_name)
-            if current is None:
-                return None
-            if current[1] <= _now():
-                self._owners.pop(pool_name, None)
-                return None
-            return current[0]
-
-    def put_counts_by_owner(self, pool_name: str) -> dict[str, int]:
-        with self._lock:
-            return dict(self._put_counts[pool_name])
-
-    def set_fail_renew_when_put_count_at_least(
-        self, pool_name: str, owner_id: str, count: int
-    ) -> None:
-        with self._lock:
-            self._fail_renew_after_puts[(pool_name, owner_id)] = count
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)

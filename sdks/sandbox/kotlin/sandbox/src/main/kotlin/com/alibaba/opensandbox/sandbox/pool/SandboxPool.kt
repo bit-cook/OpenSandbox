@@ -37,7 +37,6 @@ import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -120,9 +119,7 @@ class SandboxPool internal constructor(
             warnIfPrimaryLockTtlMayExpireDuringWarmup()
             sandboxManager = createSandboxManager()
             stateStore.setIdleEntryTtl(config.poolName, config.idleTimeout)
-            if (stateStore.getMaxIdle(config.poolName) == null) {
-                stateStore.setMaxIdle(config.poolName, config.maxIdle)
-            }
+            stateStore.setMaxIdle(config.poolName, config.maxIdle)
             warmupExecutor =
                 Executors.newFixedThreadPool(config.warmupConcurrency.coerceAtLeast(1)) { r ->
                     Thread(r, "sandbox-pool-warmup-${config.poolName}").apply { isDaemon = true }
@@ -276,23 +273,13 @@ class SandboxPool internal constructor(
     /**
      * Updates the maximum idle target. In distributed mode the new value is written to the store
      * so the whole cluster (including the leader) uses it; in single-node only this process sees it.
-     * This method can be called from any node. Actual replenish or shrink work is performed by the
-     * current primary during reconcile, so this method triggers a reconcile tick without blocking on convergence.
+     * This method can be called from any node. Actual replenish or shrink work is performed
+     * asynchronously by the current primary during periodic reconcile.
      */
     fun resize(maxIdle: Int) {
         require(maxIdle >= 0) { "maxIdle must be >= 0" }
         stateStore.setMaxIdle(config.poolName, maxIdle)
         currentMaxIdle = maxIdle
-        if (lifecycleState.get() != LifecycleState.RUNNING) return
-        try {
-            scheduler?.execute { runReconcileTick() }
-        } catch (_: RejectedExecutionException) {
-            logger.debug(
-                "Resize reconcile trigger skipped because scheduler is shutting down: pool_name={} state={}",
-                config.poolName,
-                lifecycleState.get(),
-            )
-        }
     }
 
     /**

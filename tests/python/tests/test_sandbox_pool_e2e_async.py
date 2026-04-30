@@ -25,7 +25,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from opensandbox import Sandbox, SandboxManager
-from opensandbox.exceptions import PoolEmptyException, PoolNotRunningException
+from opensandbox.exceptions import (
+    PoolAcquireFailedException,
+    PoolEmptyException,
+    PoolNotRunningException,
+)
 from opensandbox.models.sandboxes import SandboxFilter
 from opensandbox.pool import (
     AcquirePolicy,
@@ -127,6 +131,8 @@ class TestSandboxPoolSingleNodeE2EAsync:
         with pytest.raises(PoolNotRunningException):
             await self.pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
 
+        await self.pool.release_all_idle()
+        assert (await self.pool.snapshot()).idle_count == 0
         await self.store.put_idle(self.pool_name, f"injected-a-{uuid.uuid4().hex}")
         await self.store.put_idle(self.pool_name, f"injected-b-{uuid.uuid4().hex}")
         assert await self.pool.release_all_idle() == 2
@@ -139,8 +145,7 @@ class TestSandboxPoolSingleNodeE2EAsync:
         )
 
         await self.pool.resize(0)
-        released = await self.pool.release_all_idle()
-        assert released >= 1
+        assert await self.pool.release_all_idle() >= 0
         await _eventually(
             "async releaseAllIdle reduces remote tagged sandboxes",
             lambda: _async_release_drained(self.pool, self.manager, self.tag),
@@ -268,6 +273,247 @@ class TestSandboxPoolRedisDistributedE2EAsync:
         with pytest.raises(PoolEmptyException):
             await pool_a.acquire(timedelta(minutes=2), AcquirePolicy.FAIL_FAST)
 
+        direct = await pool_a.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+        self.borrowed.append(direct)
+        assert await direct.is_healthy()
+        result = await direct.commands.run("echo py-async-redis-direct-create-ok")
+        assert result.error is None
+        assert (await pool_a.snapshot()).idle_count == 0
+
+    @pytest.mark.timeout(420)
+    async def test_async_redis_primary_failover_and_restart_stay_bounded(self) -> None:
+        pool_name = f"async-redis-failover-{self.tag}"
+        owner_a = f"owner-a-{self.tag}"
+        owner_b = f"owner-b-{self.tag}"
+        store_a = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, owner_a, store_a, self.tag, 1)
+        pool_b = _create_pool(pool_name, owner_b, store_b, self.tag, 1)
+        self.pools.extend([pool_a, pool_b])
+        lock_key = store_a._primary_lock_key(pool_name)
+
+        await pool_a.start()
+        await _eventually(
+            "async first Redis node owns primary lock and warms",
+            lambda: _redis_lock_and_snapshot_match(
+                self.redis,
+                lock_key,
+                owner_a,
+                pool_a,
+                lambda snap: snap.idle_count >= 1,
+            ),
+        )
+
+        await pool_b.start()
+        await pool_a.shutdown(False)
+        await pool_b.resize(1)
+        await _eventually(
+            "async Redis primary lock fails over",
+            lambda: _redis_lock_and_snapshot_match(
+                self.redis,
+                lock_key,
+                owner_b,
+                pool_b,
+                lambda snap: snap.idle_count >= 1,
+            ),
+            timeout=timedelta(seconds=60),
+        )
+
+        await pool_a.start()
+        await pool_b.resize(1)
+        await _eventually(
+            "async Redis restart stays bounded",
+            lambda: _snapshot_and_remote_count_match(
+                pool_a,
+                self.manager,
+                self.tag,
+                lambda snap, count: snap.idle_count <= 1 and count <= 2,
+            ),
+            timeout=timedelta(seconds=60),
+        )
+
+    @pytest.mark.timeout(420)
+    async def test_async_redis_start_overwrites_stale_shared_max_idle_after_restart(self) -> None:
+        pool_name = f"async-redis-restart-config-{self.tag}"
+        store_a = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 1)
+        self.pools.append(pool_a)
+
+        await pool_a.start()
+        await _eventually(
+            "async initial Redis pool warms",
+            lambda: _snapshot_matches(pool_a, lambda snap: snap.idle_count >= 1),
+        )
+        await pool_a.resize(0)
+        await _eventually(
+            "async initial Redis pool drains to zero",
+            lambda: _snapshot_matches(pool_a, lambda snap: snap.idle_count == 0),
+        )
+        await pool_a.shutdown(False)
+
+        store_b = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 2)
+        self.pools.append(pool_b)
+        await pool_b.start()
+
+        await _eventually(
+            "async restart with same Redis namespace uses new configured max_idle",
+            lambda: _snapshot_matches(
+                pool_b,
+                lambda snap: snap.max_idle == 2 and snap.idle_count >= 2,
+            ),
+        )
+
+    @pytest.mark.timeout(420)
+    async def test_async_redis_secondary_resize_is_applied_by_primary_periodic_reconcile(self) -> None:
+        pool_name = f"async-redis-secondary-resize-{self.tag}"
+        owner_a = f"owner-a-{self.tag}"
+        owner_b = f"owner-b-{self.tag}"
+        store_a = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, owner_a, store_a, self.tag, 2)
+        pool_b = _create_pool(pool_name, owner_b, store_b, self.tag, 2)
+        self.pools.extend([pool_a, pool_b])
+        lock_key = store_a._primary_lock_key(pool_name)
+
+        await pool_a.start()
+        await _eventually(
+            "async primary Redis node owns lock and warms",
+            lambda: _redis_lock_and_snapshot_match(
+                self.redis,
+                lock_key,
+                owner_a,
+                pool_a,
+                lambda snap: snap.idle_count >= 2,
+            ),
+        )
+        await pool_b.start()
+
+        await pool_b.resize(0)
+        await _eventually(
+            "async secondary resize to zero is applied by primary",
+            lambda: _redis_lock_and_snapshot_match(
+                self.redis,
+                lock_key,
+                owner_a,
+                pool_a,
+                lambda snap: snap.idle_count == 0,
+            ),
+        )
+        await pool_b.resize(2)
+        await _eventually(
+            "async secondary resize up is applied by primary",
+            lambda: _redis_lock_and_snapshot_match(
+                self.redis,
+                lock_key,
+                owner_a,
+                pool_a,
+                lambda snap: snap.idle_count >= 2,
+            ),
+        )
+
+    @pytest.mark.timeout(420)
+    async def test_async_redis_concurrent_acquire_and_resize_jitter_remain_bounded(self) -> None:
+        pool_name = f"async-redis-acquire-resize-jitter-{self.tag}"
+        store_a = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 2)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 2)
+        self.pools.extend([pool_a, pool_b])
+        await pool_a.start()
+        await pool_b.start()
+        await _eventually(
+            "async Redis jitter pool warms two idle",
+            lambda: _snapshot_matches(pool_a, lambda snap: snap.idle_count >= 2),
+        )
+
+        async def acquire_once(index: int) -> Sandbox:
+            pool = pool_a if index % 2 == 0 else pool_b
+            sandbox = await pool.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+            result = await sandbox.commands.run(f"echo py-async-redis-jitter-{index}")
+            assert result.error is None
+            return sandbox
+
+        async def resize_jitter() -> None:
+            for index in range(8):
+                await (pool_a if index % 2 == 0 else pool_b).resize(index % 3)
+                await asyncio.sleep(0.2)
+            await pool_b.resize(2)
+
+        acquired, _ = await asyncio.gather(
+            asyncio.gather(*(acquire_once(i) for i in range(4))),
+            resize_jitter(),
+        )
+        self.borrowed.extend(acquired)
+        assert len({sandbox.id for sandbox in acquired}) == 4
+
+        await _eventually(
+            "async Redis acquire plus resize jitter converges and stays bounded",
+            lambda: _snapshot_and_remote_count_match(
+                pool_a,
+                self.manager,
+                self.tag,
+                lambda snap, count: snap.idle_count <= 2 and count <= 8,
+            ),
+            timeout=timedelta(seconds=90),
+        )
+
+    @pytest.mark.timeout(360)
+    async def test_async_redis_stale_idle_is_removed_and_direct_create_fallback_works(self) -> None:
+        pool_name = f"async-redis-stale-{self.tag}"
+        store_a = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        store_b = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        pool_a = _create_pool(pool_name, f"owner-a-{self.tag}", store_a, self.tag, 0)
+        pool_b = _create_pool(pool_name, f"owner-b-{self.tag}", store_b, self.tag, 0)
+        self.pools.extend([pool_a, pool_b])
+        await pool_a.start()
+        await pool_b.start()
+
+        await store_a.put_idle(pool_name, f"missing-{uuid.uuid4().hex}")
+        with pytest.raises(PoolAcquireFailedException):
+            await pool_b.acquire(timedelta(seconds=2), AcquirePolicy.FAIL_FAST)
+        assert (await store_a.snapshot_counters(pool_name)).idle_count == 0
+
+        sandbox = await pool_b.acquire(timedelta(minutes=5), AcquirePolicy.DIRECT_CREATE)
+        self.borrowed.append(sandbox)
+        assert await sandbox.is_healthy()
+
+    @pytest.mark.timeout(420)
+    async def test_async_redis_lost_lock_window_discards_orphan_and_recovers(self) -> None:
+        pool_name = f"async-redis-renew-window-{self.tag}"
+        owner = f"owner-a-{self.tag}"
+        store = AsyncRedisPoolStateStore(self.redis, self.key_prefix)
+        lock_key = store._primary_lock_key(pool_name)
+        dropped_once = asyncio.Event()
+
+        async def drop_lock_once(_: Sandbox) -> None:
+            if not dropped_once.is_set():
+                dropped_once.set()
+                await self.redis.delete(lock_key)
+
+        pool = _create_pool(
+            pool_name,
+            owner,
+            store,
+            self.tag,
+            1,
+            warmup_sandbox_preparer=drop_lock_once,
+        )
+        self.pools.append(pool)
+
+        await pool.start()
+        await _eventually(
+            "async Redis pool recovers after losing primary lock during warmup",
+            lambda: _snapshot_matches(pool, lambda snap: snap.idle_count == 1),
+            timeout=timedelta(seconds=90),
+            interval=timedelta(milliseconds=500),
+        )
+        await _eventually(
+            "async lost-lock orphan cleanup keeps remote count bounded",
+            lambda: _remote_count_matches(self.manager, self.tag, lambda count: count == 1),
+            timeout=timedelta(seconds=60),
+        )
+
 
 def _create_pool(
     pool_name: str,
@@ -358,17 +604,20 @@ async def _cleanup_borrowed(sandboxes: list[Sandbox]) -> None:
 
 
 async def _cleanup_tagged_sandboxes(manager: SandboxManager, tag: str) -> None:
-    try:
-        infos = await manager.list_sandbox_infos(
-            SandboxFilter(metadata={"tag": tag}, page_size=50)
-        )
-        for info in infos.sandbox_infos:
-            try:
-                await manager.kill_sandbox(info.id)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    for _ in range(5):
+        try:
+            infos = await manager.list_sandbox_infos(
+                SandboxFilter(metadata={"tag": tag}, page_size=50)
+            )
+            if not infos.sandbox_infos:
+                return
+            for info in infos.sandbox_infos:
+                try:
+                    await manager.kill_sandbox(info.id)
+                except Exception:
+                    pass
+        except Exception:
+            return
 
 
 async def _count_tagged_sandboxes(manager: SandboxManager, tag: str) -> int:
@@ -383,6 +632,34 @@ async def _async_release_drained(
 ) -> bool:
     snapshot = await pool.snapshot()
     return snapshot.idle_count == 0 and await _count_tagged_sandboxes(manager, tag) == 0
+
+
+async def _redis_lock_and_snapshot_match(
+    redis: object,
+    lock_key: str,
+    owner_id: str,
+    pool: SandboxPoolAsync,
+    predicate: Callable[[PoolSnapshot], bool],
+) -> bool:
+    owner = await redis.get(lock_key)  # type: ignore[attr-defined]
+    return owner == owner_id and predicate(await pool.snapshot())
+
+
+async def _snapshot_and_remote_count_match(
+    pool: SandboxPoolAsync,
+    manager: SandboxManager,
+    tag: str,
+    predicate: Callable[[PoolSnapshot, int], bool],
+) -> bool:
+    return predicate(await pool.snapshot(), await _count_tagged_sandboxes(manager, tag))
+
+
+async def _remote_count_matches(
+    manager: SandboxManager,
+    tag: str,
+    predicate: Callable[[int], bool],
+) -> bool:
+    return predicate(await _count_tagged_sandboxes(manager, tag))
 
 
 def _tag(prefix: str) -> str:

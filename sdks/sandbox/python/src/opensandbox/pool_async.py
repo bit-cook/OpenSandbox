@@ -46,6 +46,8 @@ from opensandbox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
+_WARMUP_TERMINATION_TIMEOUT_SECONDS = 5.0
+
 
 class SandboxPoolAsync:
     """Client-side asyncio sandbox pool aligned with Kotlin SandboxPool."""
@@ -133,14 +135,14 @@ class SandboxPoolAsync:
                 await self._state_store.set_idle_entry_ttl(
                     self._config.pool_name, self._config.idle_timeout
                 )
-                if await self._state_store.get_max_idle(self._config.pool_name) is None:
-                    await self._state_store.set_max_idle(
-                        self._config.pool_name, self._config.max_idle
-                    )
-                self._stop_event = asyncio.Event()
+                await self._state_store.set_max_idle(
+                    self._config.pool_name, self._config.max_idle
+                )
+                stop_event = asyncio.Event()
+                self._stop_event = stop_event
                 self._lifecycle_state = PoolLifecycleState.RUNNING
                 self._scheduler_task = asyncio.create_task(
-                    self._run_scheduler(),
+                    self._run_scheduler(stop_event),
                     name=f"sandbox-pool-reconcile-{self._config.pool_name}",
                 )
             except Exception:
@@ -172,7 +174,7 @@ class SandboxPoolAsync:
                 try:
                     sandbox = await self._sandbox_factory.connect(
                         sandbox_id,
-                        connection_config=self._connection_without_transport(),
+                        connection_config=self._connection_for_pool_resource(),
                         health_check=self._config.acquire_health_check,
                         connect_timeout=self._config.acquire_ready_timeout,
                         health_check_polling_interval=(
@@ -217,11 +219,6 @@ class SandboxPoolAsync:
             raise ValueError("max_idle must be >= 0")
         await self._state_store.set_max_idle(self._config.pool_name, max_idle)
         self._current_max_idle = max_idle
-        if self._lifecycle_state == PoolLifecycleState.RUNNING:
-            asyncio.create_task(
-                self._run_reconcile_tick(),
-                name=f"sandbox-pool-resize-{self._config.pool_name}",
-            )
 
     async def release_all_idle(self) -> int:
         pool_name = self._config.pool_name
@@ -312,7 +309,7 @@ class SandboxPoolAsync:
     ) -> None:
         await self.shutdown(graceful=True)
 
-    async def _run_scheduler(self) -> None:
+    async def _run_scheduler(self, stop_event: asyncio.Event) -> None:
         initial_delay = (
             0
             if self._config.max_idle > 0
@@ -320,15 +317,15 @@ class SandboxPoolAsync:
         )
         if initial_delay > 0:
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=initial_delay)
+                await asyncio.wait_for(stop_event.wait(), timeout=initial_delay)
                 return
             except (asyncio.TimeoutError, TimeoutError):
                 pass
-        while not self._stop_event.is_set():
+        while not stop_event.is_set():
             await self._run_reconcile_tick()
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(),
+                    stop_event.wait(),
                     timeout=self._config.reconcile_interval.total_seconds(),
                 )
                 break
@@ -405,7 +402,7 @@ class SandboxPoolAsync:
             secure_access=spec.secure_access,
             entrypoint=spec.entrypoint,
             volumes=spec.volumes,
-            connection_config=self._connection_without_transport(),
+            connection_config=self._connection_for_pool_resource(),
             health_check=self._config.warmup_health_check,
             health_check_polling_interval=self._config.warmup_health_check_polling_interval,
             skip_health_check=self._config.warmup_skip_health_check,
@@ -425,7 +422,7 @@ class SandboxPoolAsync:
             secure_access=spec.secure_access,
             entrypoint=spec.entrypoint,
             volumes=spec.volumes,
-            connection_config=self._connection_without_transport(),
+            connection_config=self._connection_for_pool_resource(),
             health_check=self._config.acquire_health_check,
             health_check_polling_interval=self._config.acquire_health_check_polling_interval,
             skip_health_check=self._config.acquire_skip_health_check,
@@ -439,9 +436,11 @@ class SandboxPoolAsync:
         return self._current_max_idle if shared is None else shared
 
     async def _create_sandbox_manager(self) -> SandboxManager:
-        return await self._sandbox_manager_factory(self._connection_without_transport())
+        return await self._sandbox_manager_factory(self._connection_for_pool_resource())
 
-    def _connection_without_transport(self) -> ConnectionConfig:
+    def _connection_for_pool_resource(self) -> ConnectionConfig:
+        if self._connection_config.transport is not None and not self._connection_config._owns_transport:
+            return self._connection_config
         config = self._connection_config.model_copy(update={"transport": None})
         config._owns_transport = True
         return config
@@ -497,11 +496,18 @@ class SandboxPoolAsync:
             except (asyncio.TimeoutError, TimeoutError):
                 task.cancel()
             self._scheduler_task = None
-        if not wait_for_warmup:
-            for warmup_task in list(self._warmup_tasks):
+        warmup_tasks = list(self._warmup_tasks)
+        if wait_for_warmup and warmup_tasks:
+            await asyncio.gather(*warmup_tasks, return_exceptions=True)
+        elif warmup_tasks:
+            _, pending = await asyncio.wait(
+                warmup_tasks,
+                timeout=_WARMUP_TERMINATION_TIMEOUT_SECONDS,
+            )
+            for warmup_task in pending:
                 warmup_task.cancel()
-        elif self._warmup_tasks:
-            await asyncio.gather(*self._warmup_tasks, return_exceptions=True)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         await self._release_primary_lock_best_effort()
 
     async def _release_primary_lock_best_effort(self) -> None:

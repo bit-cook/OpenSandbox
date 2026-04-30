@@ -212,10 +212,21 @@ Notes:
 
 - `InMemoryPoolStateStore` is for single-process development and tests. It is not
   a process-wide or pod-wide pool for gunicorn, uvicorn workers, Celery, or Kubernetes.
+- `max_idle` is the target/cap for ready idle sandboxes. It is not a global limit
+  on borrowed or directly-created sandboxes.
 - For distributed deployment, all nodes in one logical pool must share the same
   `key_prefix` and `pool_name`.
+- Each running process should use a unique `owner_id`; it identifies the primary
+  lock owner and is not the pool identifier.
 - All nodes sharing one pool must use the same creation and warmup definition. If
   that definition changes, use a new `pool_name` or `key_prefix` and drain the old pool.
+- `resize(max_idle)` can be called from any node. The call returns after the new
+  idle target is stored in the shared state store; the current primary applies
+  replenish or shrink work during periodic reconcile.
+- Use `resize(0)` and wait for `snapshot().idle_count == 0` to drain a distributed
+  idle buffer. `release_all_idle()` is only a best-effort cleanup pass in distributed
+  mode because another primary may put new idle sandboxes concurrently unless the
+  shared target has already been reduced.
 - Configure `primary_lock_ttl` greater than `warmup_ready_timeout` plus expected
   warmup preparer time and buffer.
 - Redis outages are surfaced as pool state store errors. The pool fails closed; it

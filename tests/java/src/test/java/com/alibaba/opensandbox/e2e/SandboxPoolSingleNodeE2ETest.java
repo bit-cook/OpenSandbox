@@ -680,7 +680,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
 
         pool.resize(0);
         int released = pool.releaseAllIdle();
-        assertTrue(released >= 1, "releaseAllIdle should release at least one idle sandbox");
+        assertTrue(released >= 0, "releaseAllIdle should return non-negative count");
 
         eventually(
                 "idle count reaches zero after releaseAllIdle",
@@ -692,7 +692,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                 "remote tagged sandbox count decreases after releaseAllIdle",
                 Duration.ofSeconds(60),
                 Duration.ofSeconds(2),
-                () -> countTaggedSandboxes() <= Math.max(0, before - released + 1));
+                () -> countTaggedSandboxes() == 0);
     }
 
     @Test

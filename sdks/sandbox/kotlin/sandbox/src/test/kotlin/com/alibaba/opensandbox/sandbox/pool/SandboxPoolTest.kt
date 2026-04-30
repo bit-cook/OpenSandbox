@@ -517,6 +517,21 @@ class SandboxPoolTest {
         }
     }
 
+    @Test
+    fun `start overwrites shared maxIdle with user config`() {
+        val store = RecordingPoolStateStore(initialMaxIdle = 0)
+        val pool = buildPool(store = store, maxIdle = 3)
+
+        pool.start()
+        try {
+            assertEquals(3, store.maxIdleByPool["test-pool"])
+            assertEquals(listOf("test-pool" to 3), store.setMaxIdleCalls)
+            assertEquals(3, pool.snapshot().maxIdle)
+        } finally {
+            pool.shutdown(graceful = false)
+        }
+    }
+
     private fun buildPool(
         store: PoolStateStore = InMemoryPoolStateStore(),
         maxIdle: Int = 2,
@@ -547,8 +562,17 @@ class SandboxPoolTest {
 
     private class RecordingPoolStateStore(
         private val releaseFails: Boolean = false,
+        initialMaxIdle: Int? = null,
     ) : PoolStateStore {
         val releasedLocks = mutableListOf<Pair<String, String>>()
+        val setMaxIdleCalls = mutableListOf<Pair<String, Int>>()
+        val maxIdleByPool = mutableMapOf<String, Int>()
+
+        init {
+            if (initialMaxIdle != null) {
+                maxIdleByPool["test-pool"] = initialMaxIdle
+            }
+        }
 
         override fun tryTakeIdle(poolName: String): String? = null
 
@@ -596,12 +620,14 @@ class SandboxPoolTest {
 
         override fun snapshotIdleEntries(poolName: String): List<IdleEntry> = emptyList()
 
-        override fun getMaxIdle(poolName: String): Int? = null
+        override fun getMaxIdle(poolName: String): Int? = maxIdleByPool[poolName]
 
         override fun setMaxIdle(
             poolName: String,
             maxIdle: Int,
         ) {
+            setMaxIdleCalls += poolName to maxIdle
+            maxIdleByPool[poolName] = maxIdle
         }
     }
 }

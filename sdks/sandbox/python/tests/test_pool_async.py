@@ -5,6 +5,7 @@ import time
 from datetime import timedelta
 from typing import Any, cast
 
+import httpx
 import pytest
 
 from opensandbox.config import ConnectionConfig
@@ -94,7 +95,52 @@ async def test_async_start_warms_idle_and_resize_zero_shrinks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_graceful_shutdown_is_bounded_by_drain_timeout_during_warmup() -> None:
+async def test_async_start_overwrites_shared_max_idle_with_user_config() -> None:
+    store = SharedAsyncMaxIdleStore(initial_max_idle=0)
+    pool = _create_pool(max_idle=3, store=store)
+    await pool.start()
+
+    try:
+        assert store.max_idle_by_pool["pool"] == 3
+        assert store.set_max_idle_calls == [("pool", 3)]
+        assert (await pool.snapshot()).max_idle == 3
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_resize_only_updates_target_without_immediate_reconcile_trigger() -> None:
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        reconcile_interval=timedelta(seconds=10),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),
+        sandbox_factory=FakeAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    calls = 0
+
+    async def record_reconcile() -> None:
+        nonlocal calls
+        calls += 1
+
+    pool._run_reconcile_tick = record_reconcile  # type: ignore[method-assign]
+    try:
+        await pool.resize(1)
+        await asyncio.sleep(0.05)
+
+        assert calls == 0
+        assert (await pool.snapshot()).max_idle == 1
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_graceful_shutdown_waits_for_running_warmup_before_stop() -> None:
     FakeAsyncSandbox.reset()
     entered_preparer = asyncio.Event()
     release_preparer = asyncio.Event()
@@ -122,14 +168,77 @@ async def test_async_graceful_shutdown_is_bounded_by_drain_timeout_during_warmup
     try:
         await asyncio.wait_for(entered_preparer.wait(), timeout=2)
 
+        async def release_after_delay() -> None:
+            await asyncio.sleep(0.05)
+            release_preparer.set()
+
+        release_task = asyncio.create_task(release_after_delay())
         started = time.monotonic()
         await pool.shutdown(graceful=True)
         elapsed = time.monotonic() - started
+        await release_task
 
-        assert elapsed < 1.0
+        assert elapsed >= 0.04
         assert (await pool.snapshot()).lifecycle_state.value == "STOPPED"
     finally:
         release_preparer.set()
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_graceful_shutdown_restart_does_not_reuse_stop_event() -> None:
+    pool = _create_pool(max_idle=0)
+    await pool.start()
+    first_stop_event = pool._stop_event
+
+    try:
+        await pool.shutdown(graceful=True)
+        assert first_stop_event.is_set()
+
+        await pool.start()
+
+        assert pool._stop_event is not first_stop_event
+        assert first_stop_event.is_set()
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_user_managed_transport_is_preserved_for_pool_resources() -> None:
+    transport = _AsyncTransport()
+    connection_config = ConnectionConfig(transport=transport)
+    manager_configs: list[ConnectionConfig] = []
+    sandbox_configs: list[ConnectionConfig] = []
+
+    class CapturingAsyncSandbox(FakeAsyncSandbox):
+        @classmethod
+        async def create(cls, *args: Any, **kwargs: Any) -> CapturingAsyncSandbox:
+            sandbox_configs.append(kwargs["connection_config"])
+            return cls("created-with-custom-transport")
+
+    async def manager_factory(config: ConnectionConfig) -> FakeAsyncManager:
+        manager_configs.append(config)
+        return FakeAsyncManager()
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=connection_config,
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=manager_factory,  # type: ignore[arg-type]
+        sandbox_factory=CapturingAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        await pool.acquire()
+
+        assert manager_configs[0].transport is transport
+        assert not manager_configs[0]._owns_transport
+        assert sandbox_configs[0].transport is transport
+        assert not sandbox_configs[0]._owns_transport
+    finally:
         await pool.shutdown(False)
 
 
@@ -218,3 +327,24 @@ class FakeAsyncSandbox:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class SharedAsyncMaxIdleStore(InMemoryAsyncPoolStateStore):
+    def __init__(self, initial_max_idle: int | None = None) -> None:
+        super().__init__()
+        self.max_idle_by_pool: dict[str, int] = {}
+        self.set_max_idle_calls: list[tuple[str, int]] = []
+        if initial_max_idle is not None:
+            self.max_idle_by_pool["pool"] = initial_max_idle
+
+    async def get_max_idle(self, pool_name: str) -> int | None:
+        return self.max_idle_by_pool.get(pool_name)
+
+    async def set_max_idle(self, pool_name: str, max_idle: int) -> None:
+        self.set_max_idle_calls.append((pool_name, max_idle))
+        self.max_idle_by_pool[pool_name] = max_idle
+
+
+class _AsyncTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request)

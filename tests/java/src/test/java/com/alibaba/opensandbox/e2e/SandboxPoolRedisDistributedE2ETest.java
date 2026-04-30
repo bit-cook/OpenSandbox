@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
 import com.alibaba.opensandbox.sandbox.SandboxManager;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolAcquireFailedException;
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolEmptyException;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest;
@@ -43,6 +44,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -165,6 +167,20 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         assertThrows(
                 PoolEmptyException.class,
                 () -> poolA.acquire(Duration.ofMinutes(2), AcquirePolicy.FAIL_FAST));
+
+        Sandbox direct = poolA.acquire(Duration.ofMinutes(5), AcquirePolicy.DIRECT_CREATE);
+        borrowed.add(direct);
+        assertTrue(
+                direct.isHealthy(), "direct create should still work when shared maxIdle is zero");
+        Execution directExecution =
+                direct.commands()
+                        .run(RunCommandRequest.builder().command("echo redis-direct-ok").build());
+        assertNotNull(directExecution);
+        assertNull(directExecution.getError());
+        assertEquals(
+                0,
+                poolA.snapshot().getIdleCount(),
+                "DIRECT_CREATE must not repopulate the shared idle store");
     }
 
     @Test
@@ -207,6 +223,84 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
                 Duration.ofSeconds(1),
                 () -> poolB.snapshot().getIdleCount() >= 1);
         assertTrue(beforeShutdown >= 1, "poolA should have warmed idle before shutdown");
+    }
+
+    @Test
+    @DisplayName("Redis start overwrites stale shared maxIdle after restart")
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void testStartOverwritesStaleSharedMaxIdleAfterRestart() throws Exception {
+        tag = "e2e-redis-restart-config-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-restart-config-" + tag;
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolA = createPool(poolName, "owner-a-" + tag, storeA, 1);
+        pools.add(poolA);
+
+        poolA.start();
+        eventually(
+                "initial Redis-backed pool warms",
+                AWAIT_TIMEOUT,
+                Duration.ofSeconds(1),
+                () -> poolA.snapshot().getIdleCount() >= 1);
+        poolA.resize(0);
+        eventually(
+                "initial Redis-backed pool drains to zero",
+                Duration.ofSeconds(45),
+                Duration.ofSeconds(1),
+                () -> poolA.snapshot().getIdleCount() == 0);
+        poolA.shutdown(false);
+
+        RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolB = createPool(poolName, "owner-b-" + tag, storeB, 2);
+        pools.add(poolB);
+        poolB.start();
+
+        eventually(
+                "restart with same Redis namespace uses new configured maxIdle",
+                AWAIT_TIMEOUT,
+                Duration.ofSeconds(1),
+                () -> poolB.snapshot().getMaxIdle() == 2 && poolB.snapshot().getIdleCount() >= 2);
+    }
+
+    @Test
+    @DisplayName("Redis secondary resize is applied by primary periodic reconcile")
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void testSecondaryResizeAppliedByPrimaryPeriodicReconcile() throws Exception {
+        tag = "e2e-redis-secondary-resize-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-secondary-resize-" + tag;
+        String ownerA = "owner-a-" + tag;
+        String ownerB = "owner-b-" + tag;
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
+        RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolA = createPool(poolName, ownerA, storeA, 2);
+        SandboxPool poolB = createPool(poolName, ownerB, storeB, 2);
+        pools.add(poolA);
+        pools.add(poolB);
+        String lockKey = poolKey(poolName, "lock");
+
+        poolA.start();
+        eventually(
+                "primary Redis-backed node owns lock and warms",
+                AWAIT_TIMEOUT,
+                Duration.ofSeconds(1),
+                () -> ownerA.equals(redis.get(lockKey)) && poolA.snapshot().getIdleCount() >= 2);
+        poolB.start();
+
+        poolB.resize(0);
+        eventually(
+                "secondary resize to zero is applied by primary",
+                AWAIT_TIMEOUT,
+                Duration.ofSeconds(1),
+                () -> ownerA.equals(redis.get(lockKey)) && poolA.snapshot().getIdleCount() == 0);
+        poolB.resize(2);
+        eventually(
+                "secondary resize up is applied by primary",
+                AWAIT_TIMEOUT,
+                Duration.ofSeconds(1),
+                () -> ownerA.equals(redis.get(lockKey)) && poolA.snapshot().getIdleCount() >= 2);
     }
 
     @Test
@@ -310,7 +404,152 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
         assertEquals(0, store.snapshotCounters(poolName).getIdleCount());
     }
 
+    @Test
+    @DisplayName("Redis concurrent acquire and resize jitter stay bounded")
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void testConcurrentAcquireAndResizeJitterStayBounded() throws Exception {
+        tag = "e2e-redis-acquire-resize-jitter-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-acquire-resize-jitter-" + tag;
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
+        RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolA = createPool(poolName, "owner-a-" + tag, storeA, 2);
+        SandboxPool poolB = createPool(poolName, "owner-b-" + tag, storeB, 2);
+        pools.add(poolA);
+        pools.add(poolB);
+        poolA.start();
+        poolB.start();
+        eventually(
+                "Redis-backed jitter pool warms two idle sandboxes",
+                AWAIT_TIMEOUT,
+                Duration.ofSeconds(1),
+                () -> poolA.snapshot().getIdleCount() >= 2);
+
+        ExecutorService executor = Executors.newFixedThreadPool(5);
+        Set<String> acquiredIds = ConcurrentHashMap.newKeySet();
+        List<Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < 4; i++) {
+            final int index = i;
+            futures.add(
+                    executor.submit(
+                            () -> {
+                                SandboxPool pool = index % 2 == 0 ? poolA : poolB;
+                                Sandbox sandbox =
+                                        pool.acquire(
+                                                Duration.ofMinutes(5), AcquirePolicy.DIRECT_CREATE);
+                                borrowed.add(sandbox);
+                                assertTrue(
+                                        acquiredIds.add(sandbox.getId()),
+                                        "sandbox ID must not be acquired twice");
+                                Execution execution =
+                                        sandbox.commands()
+                                                .run(
+                                                        RunCommandRequest.builder()
+                                                                .command(
+                                                                        "echo redis-jitter-"
+                                                                                + index)
+                                                                .build());
+                                assertNotNull(execution);
+                                assertNull(execution.getError());
+                                return null;
+                            }));
+        }
+        futures.add(
+                executor.submit(
+                        () -> {
+                            for (int i = 0; i < 8; i++) {
+                                (i % 2 == 0 ? poolA : poolB).resize(i % 3);
+                                Thread.sleep(200);
+                            }
+                            poolB.resize(2);
+                            return null;
+                        }));
+
+        try {
+            for (Future<?> future : futures) {
+                future.get(180, TimeUnit.SECONDS);
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+        assertEquals(4, acquiredIds.size());
+        eventually(
+                "Redis-backed acquire plus resize jitter converges and stays bounded",
+                Duration.ofSeconds(90),
+                Duration.ofSeconds(1),
+                () -> poolA.snapshot().getIdleCount() <= 2 && countTaggedSandboxes(tag) <= 8);
+    }
+
+    @Test
+    @DisplayName("Redis stale idle is removed and direct-create fallback works")
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void testStaleIdleIsRemovedAndDirectCreateFallbackWorks() throws Exception {
+        tag = "e2e-redis-stale-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-stale-" + tag;
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        RedisPoolStateStore storeA = new RedisPoolStateStore(redis, keyPrefix);
+        RedisPoolStateStore storeB = new RedisPoolStateStore(redis, keyPrefix);
+        SandboxPool poolA = createPool(poolName, "owner-a-" + tag, storeA, 0);
+        SandboxPool poolB = createPool(poolName, "owner-b-" + tag, storeB, 0);
+        pools.add(poolA);
+        pools.add(poolB);
+        poolA.start();
+        poolB.start();
+
+        storeA.putIdle(poolName, "missing-" + UUID.randomUUID());
+        assertThrows(
+                PoolAcquireFailedException.class,
+                () -> poolB.acquire(Duration.ofSeconds(2), AcquirePolicy.FAIL_FAST));
+        assertEquals(0, storeA.snapshotCounters(poolName).getIdleCount());
+
+        Sandbox sandbox = poolB.acquire(Duration.ofMinutes(5), AcquirePolicy.DIRECT_CREATE);
+        borrowed.add(sandbox);
+        assertTrue(sandbox.isHealthy(), "direct create should work after stale idle removal");
+    }
+
+    @Test
+    @DisplayName("Redis store drops lost-lock warmup orphan and recovers")
+    @Timeout(value = 7, unit = TimeUnit.MINUTES)
+    void testLostLockWindowDropsWarmupOrphanAndRecovers() throws Exception {
+        tag = "e2e-redis-renew-window-" + UUID.randomUUID().toString().substring(0, 8);
+        String poolName = "redis-renew-window-" + tag;
+        sandboxManager = SandboxManager.builder().connectionConfig(sharedConnectionConfig).build();
+
+        AtomicBoolean droppedOnce = new AtomicBoolean(false);
+        RedisPoolStateStore store = new RedisPoolStateStore(redis, keyPrefix);
+        String lockKey = poolKey(poolName, "lock");
+        SandboxPool pool =
+                createPoolBuilder(poolName, "owner-a-" + tag, store, 1)
+                        .warmupSandboxPreparer(
+                                sandbox -> {
+                                    if (droppedOnce.compareAndSet(false, true)) {
+                                        redis.del(lockKey);
+                                    }
+                                })
+                        .build();
+        pools.add(pool);
+
+        pool.start();
+        eventually(
+                "Redis-backed pool recovers after losing primary lock during warmup",
+                Duration.ofSeconds(90),
+                Duration.ofMillis(500),
+                () -> pool.snapshot().getIdleCount() == 1);
+        eventually(
+                "lost-lock orphan cleanup keeps remote tagged count bounded",
+                Duration.ofSeconds(60),
+                Duration.ofSeconds(1),
+                () -> countTaggedSandboxes(tag) == 1);
+    }
+
     private SandboxPool createPool(
+            String poolName, String ownerId, RedisPoolStateStore store, int maxIdle) {
+        return createPoolBuilder(poolName, ownerId, store, maxIdle).build();
+    }
+
+    private SandboxPool.Builder createPoolBuilder(
             String poolName, String ownerId, RedisPoolStateStore store, int maxIdle) {
         PoolCreationSpec creationSpec =
                 PoolCreationSpec.builder()
@@ -336,28 +575,54 @@ public class SandboxPoolRedisDistributedE2ETest extends BaseE2ETest {
                 .creationSpec(creationSpec)
                 .reconcileInterval(RECONCILE_INTERVAL)
                 .primaryLockTtl(PRIMARY_LOCK_TTL)
-                .drainTimeout(DRAIN_TIMEOUT)
-                .build();
+                .drainTimeout(DRAIN_TIMEOUT);
     }
 
     private void cleanupTaggedSandboxes(String cleanupTag) {
-        try {
-            PagedSandboxInfos infos =
-                    sandboxManager.listSandboxInfos(
-                            SandboxFilter.builder()
-                                    .metadata(Map.of("tag", cleanupTag))
-                                    .pageSize(50)
-                                    .build());
-            infos.getSandboxInfos()
-                    .forEach(
-                            info -> {
-                                try {
-                                    sandboxManager.killSandbox(info.getId());
-                                } catch (Exception ignored) {
-                                }
-                            });
-        } catch (Exception ignored) {
+        for (int i = 0; i < 5; i++) {
+            try {
+                PagedSandboxInfos infos =
+                        sandboxManager.listSandboxInfos(
+                                SandboxFilter.builder()
+                                        .metadata(Map.of("tag", cleanupTag))
+                                        .pageSize(50)
+                                        .build());
+                if (infos.getSandboxInfos().isEmpty()) {
+                    return;
+                }
+                infos.getSandboxInfos()
+                        .forEach(
+                                info -> {
+                                    try {
+                                        sandboxManager.killSandbox(info.getId());
+                                    } catch (Exception ignored) {
+                                    }
+                                });
+            } catch (Exception ignored) {
+                return;
+            }
         }
+    }
+
+    private int countTaggedSandboxes(String queryTag) {
+        if (sandboxManager == null || queryTag == null || queryTag.isBlank()) {
+            return 0;
+        }
+        PagedSandboxInfos infos =
+                sandboxManager.listSandboxInfos(
+                        SandboxFilter.builder()
+                                .metadata(Map.of("tag", queryTag))
+                                .pageSize(50)
+                                .build());
+        return infos.getSandboxInfos().size();
+    }
+
+    private String poolKey(String poolName, String suffix) {
+        String tag =
+                java.util.Base64.getUrlEncoder()
+                        .withoutPadding()
+                        .encodeToString(poolName.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return keyPrefix + ":{" + tag + "}:" + suffix;
     }
 
     private void cleanupRedisKeys() {

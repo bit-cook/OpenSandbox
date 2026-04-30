@@ -53,7 +53,14 @@ jobs:
           docker run -d --name opensandbox-e2e-redis -p 127.0.0.1::6379 redis:7-alpine
           REDIS_PORT="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "6379/tcp") 0).HostPort}}' opensandbox-e2e-redis)"
           echo "OPENSANDBOX_TEST_REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0" >> "$GITHUB_ENV"
-          docker exec opensandbox-e2e-redis redis-cli ping
+          for i in {1..30}; do
+            if docker exec opensandbox-e2e-redis redis-cli ping | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs opensandbox-e2e-redis
+          exit 1
 
       - name: Run tests
         run: |
@@ -148,7 +155,14 @@ jobs:
           docker run -d --name opensandbox-e2e-redis -p 127.0.0.1::6379 redis:7-alpine
           REDIS_PORT="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "6379/tcp") 0).HostPort}}' opensandbox-e2e-redis)"
           echo "OPENSANDBOX_TEST_REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0" >> "$GITHUB_ENV"
-          docker exec opensandbox-e2e-redis redis-cli ping
+          for i in {1..30}; do
+            if docker exec opensandbox-e2e-redis redis-cli ping | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs opensandbox-e2e-redis
+          exit 1
 
       - name: Run tests
         env:
