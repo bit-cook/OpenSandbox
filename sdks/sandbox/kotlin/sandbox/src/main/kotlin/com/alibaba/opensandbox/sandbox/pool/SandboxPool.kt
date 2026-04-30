@@ -117,6 +117,7 @@ class SandboxPool internal constructor(
         }
         lifecycleState.set(LifecycleState.STARTING)
         try {
+            warnIfPrimaryLockTtlMayExpireDuringWarmup()
             sandboxManager = createSandboxManager()
             stateStore.setIdleEntryTtl(config.poolName, config.idleTimeout)
             if (stateStore.getMaxIdle(config.poolName) == null) {
@@ -160,6 +161,19 @@ class SandboxPool internal constructor(
             logger.error("Pool start failed: pool_name={}", config.poolName, e)
             throw e
         }
+    }
+
+    private fun warnIfPrimaryLockTtlMayExpireDuringWarmup() {
+        if (config.primaryLockTtl > config.warmupReadyTimeout) return
+        logger.warn(
+            "Pool primary lock TTL may expire during warmup: pool_name={} primary_lock_ttl_ms={} " +
+                "warmup_ready_timeout_ms={}. In distributed mode, configure primaryLockTtl greater than " +
+                "warmupReadyTimeout plus expected warmupSandboxPreparer time and buffer to avoid losing leadership " +
+                "while creating idle sandboxes.",
+            config.poolName,
+            config.primaryLockTtl.toMillis(),
+            config.warmupReadyTimeout.toMillis(),
+        )
     }
 
     /**
@@ -262,7 +276,8 @@ class SandboxPool internal constructor(
     /**
      * Updates the maximum idle target. In distributed mode the new value is written to the store
      * so the whole cluster (including the leader) uses it; in single-node only this process sees it.
-     * Triggers a reconcile tick without blocking on convergence.
+     * This method can be called from any node. Actual replenish or shrink work is performed by the
+     * current primary during reconcile, so this method triggers a reconcile tick without blocking on convergence.
      */
     fun resize(maxIdle: Int) {
         require(maxIdle >= 0) { "maxIdle must be >= 0" }
@@ -284,6 +299,8 @@ class SandboxPool internal constructor(
      * Takes all idle sandbox IDs from the store and terminates each sandbox (best-effort).
      * Use this to release held resources, e.g. before process exit on single-node, or to reset the idle buffer.
      * In distributed mode this is best-effort: concurrent putIdle on other nodes may add new idle during the loop.
+     * For a distributed idle drain, prefer [resize] to 0 and wait for snapshots to converge before using this
+     * method as a final cleanup pass.
      * If the pool is not running, a temporary [SandboxManager] is created on demand so remote idle sandboxes can
      * still be killed. Failure to create that manager does not prevent draining idle IDs from the store.
      *

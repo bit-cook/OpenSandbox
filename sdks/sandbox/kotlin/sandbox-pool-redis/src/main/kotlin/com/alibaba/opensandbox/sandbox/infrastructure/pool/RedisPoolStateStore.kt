@@ -39,6 +39,9 @@ import java.util.Base64
  *
  * This store intentionally does not create, configure, or close the Redis client. Callers own
  * the lifecycle and may pass any Jedis [UnifiedJedis] implementation appropriate for their environment.
+ * The provided client must be safe for concurrent use because pool acquire, reconcile, resize,
+ * snapshot, and release operations may call the store from different threads. [redis.clients.jedis.JedisPooled]
+ * is the recommended client type. Do not share a single non-pooled Jedis connection across pool threads.
  */
 class RedisPoolStateStore(
     private val redis: UnifiedJedis,
@@ -48,12 +51,11 @@ class RedisPoolStateStore(
 
     override fun tryTakeIdle(poolName: String): String? =
         execute("tryTakeIdle", poolName) {
-            val nowMillis = Instant.now().toEpochMilli().toString()
             val result =
                 redis.eval(
                     TAKE_IDLE_SCRIPT,
                     listOf(idleListKey(poolName), idleExpiresKey(poolName)),
-                    listOf(nowMillis),
+                    emptyList<String>(),
                 )
             result as? String
         }
@@ -64,11 +66,11 @@ class RedisPoolStateStore(
     ) {
         require(sandboxId.isNotBlank()) { "sandboxId must not be blank" }
         execute("putIdle", poolName) {
-            val expiresAtMillis = Instant.now().plus(resolveIdleTtl(poolName)).toEpochMilli().toString()
+            val idleTtlMillis = resolveIdleTtl(poolName).toMillis().coerceAtLeast(1).toString()
             redis.eval(
                 PUT_IDLE_SCRIPT,
                 listOf(idleListKey(poolName), idleExpiresKey(poolName)),
-                listOf(sandboxId, expiresAtMillis),
+                listOf(sandboxId, idleTtlMillis),
             )
         }
     }
@@ -134,7 +136,7 @@ class RedisPoolStateStore(
             redis.eval(
                 REAP_EXPIRED_SCRIPT,
                 listOf(idleListKey(poolName), idleExpiresKey(poolName)),
-                listOf(now.toEpochMilli().toString()),
+                emptyList<String>(),
             )
         }
     }
@@ -238,6 +240,8 @@ class RedisPoolStateStore(
 
         private const val TAKE_IDLE_SCRIPT =
             """
+            local redis_time = redis.call('TIME')
+            local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
             while true do
               local sandbox_id = redis.call('LPOP', KEYS[1])
               if not sandbox_id then
@@ -246,7 +250,7 @@ class RedisPoolStateStore(
               local expires_at = redis.call('HGET', KEYS[2], sandbox_id)
               if expires_at then
                 redis.call('HDEL', KEYS[2], sandbox_id)
-                if tonumber(expires_at) > tonumber(ARGV[1]) then
+                if tonumber(expires_at) > now_ms then
                   return sandbox_id
                 end
               end
@@ -255,14 +259,17 @@ class RedisPoolStateStore(
 
         private const val PUT_IDLE_SCRIPT =
             """
+            local redis_time = redis.call('TIME')
+            local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+            local expires_at = now_ms + tonumber(ARGV[2])
             local current_expires_at = redis.call('HGET', KEYS[2], ARGV[1])
-            if current_expires_at and tonumber(current_expires_at) > tonumber(ARGV[2]) then
+            if current_expires_at and tonumber(current_expires_at) > now_ms then
               return 0
             end
             if not current_expires_at then
               redis.call('RPUSH', KEYS[1], ARGV[1])
             end
-            redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+            redis.call('HSET', KEYS[2], ARGV[1], expires_at)
             return 1
             """
 
@@ -285,9 +292,11 @@ class RedisPoolStateStore(
 
         private const val REAP_EXPIRED_SCRIPT =
             """
+            local redis_time = redis.call('TIME')
+            local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
             local entries = redis.call('HGETALL', KEYS[2])
             for i = 1, #entries, 2 do
-              if tonumber(entries[i + 1]) <= tonumber(ARGV[1]) then
+              if tonumber(entries[i + 1]) <= now_ms then
                 redis.call('HDEL', KEYS[2], entries[i])
                 redis.call('LREM', KEYS[1], 0, entries[i])
               end

@@ -93,9 +93,10 @@ class RedisPoolStateStoreTest {
     fun `reapExpiredIdle removes expired entries`() {
         val stateStore = requireStore()
 
-        stateStore.setIdleEntryTtl(poolName, Duration.ofSeconds(10))
+        stateStore.setIdleEntryTtl(poolName, Duration.ofMillis(50))
         stateStore.putIdle(poolName, "id-1")
-        stateStore.reapExpiredIdle(poolName, Instant.now().plus(Duration.ofSeconds(11)))
+        Thread.sleep(100)
+        stateStore.reapExpiredIdle(poolName, Instant.now())
 
         assertEquals(0, stateStore.snapshotCounters(poolName).idleCount)
         assertNull(stateStore.tryTakeIdle(poolName))
