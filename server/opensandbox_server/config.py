@@ -887,8 +887,8 @@ def _load_toml_data(path: Path) -> dict[str, Any]:
 
 def _apply_env_overrides(config: AppConfig) -> None:
     """Apply environment variable overrides to parsed configuration."""
-    if env_api_key := os.environ.get(API_KEY_ENV_VAR):
-        config.server.api_key = env_api_key
+    if API_KEY_ENV_VAR in os.environ:
+        config.server.api_key = os.environ[API_KEY_ENV_VAR]
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
