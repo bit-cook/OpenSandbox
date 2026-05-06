@@ -40,9 +40,9 @@ class FakeK8sClient:
     def create_custom_object(self, *, group: str, version: str, namespace: str, plural: str, body: dict):
         self.created.append(deepcopy(body))
         name = body["metadata"]["name"]
-        stored = deepcopy(body)
         if name in self.objects:
-            stored = self.objects[name]
+            raise ApiException(status=409, reason="Already Exists")
+        stored = deepcopy(body)
         self.objects[name] = stored
         return stored
 
@@ -55,6 +55,44 @@ class FakeK8sClient:
         if name not in self.objects:
             raise ApiException(status=404, reason="Not Found")
         del self.objects[name]
+
+
+class TransientGetK8sClient(FakeK8sClient):
+    def __init__(self, *, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def get_custom_object(self, *, group: str, version: str, namespace: str, plural: str, name: str):
+        if self.failures > 0:
+            self.failures -= 1
+            raise ApiException(status=500, reason="temporary apiserver error")
+        return super().get_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+
+
+class TransientThenReadyK8sClient(TransientGetK8sClient):
+    def get_custom_object(self, *, group: str, version: str, namespace: str, plural: str, name: str):
+        obj = super().get_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+        if obj is not None:
+            obj["status"] = {
+                "phase": "Succeed",
+                "containers": [
+                    {"containerName": "sandbox", "imageUri": "registry/sandbox:snap"},
+                ],
+            }
+            self.objects[name] = deepcopy(obj)
+        return obj
 
 
 def _snapshot_cr(*, phase: str, containers: list[dict] | None = None, sandbox_id: str = SANDBOX_ID) -> dict:
@@ -158,6 +196,32 @@ def test_inspect_snapshot_maps_failed_condition() -> None:
     assert status.state == SnapshotState.FAILED
     assert status.reason == "CommitJobFailed"
     assert status.message == "commit job failed"
+
+
+def test_inspect_snapshot_keeps_transient_read_error_creating() -> None:
+    k8s_client = TransientGetK8sClient(failures=1)
+    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
+
+    status = runtime.inspect_snapshot(SNAPSHOT_ID)
+
+    assert status.state == SnapshotState.CREATING
+    assert status.reason == "snapshot_runtime_inspect_failed"
+    assert "temporary apiserver error" in (status.message or "")
+
+
+def test_create_snapshot_retries_transient_inspect_error_until_controller_ready() -> None:
+    k8s_client = TransientThenReadyK8sClient(failures=1)
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        wait_timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status.state == SnapshotState.READY
+    assert status.image == "registry/sandbox:snap"
 
 
 def test_delete_snapshot_deletes_cr_and_ignores_missing_cr() -> None:

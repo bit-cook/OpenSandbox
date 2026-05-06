@@ -88,6 +88,7 @@ class KubernetesSnapshotRuntime:
     ) -> Optional[SnapshotRuntimeStatus]:
         snapshot_name = build_public_snapshot_name(snapshot_id)
         body = self._build_snapshot_body(snapshot_id, sandbox_id, snapshot_name)
+        should_validate_existing_source = False
 
         try:
             self._k8s_client.create_custom_object(
@@ -105,6 +106,7 @@ class KubernetesSnapshotRuntime:
                     message=f"Failed to create Kubernetes SandboxSnapshot {snapshot_name}: {exc}",
                 )
             logger.info("Kubernetes SandboxSnapshot %s already exists; continuing", snapshot_name)
+            should_validate_existing_source = True
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to create Kubernetes SandboxSnapshot %s: %s", snapshot_name, exc)
             return SnapshotRuntimeStatus(
@@ -113,10 +115,19 @@ class KubernetesSnapshotRuntime:
                 message=f"Failed to create Kubernetes SandboxSnapshot {snapshot_name}: {exc}",
             )
 
-        current = self._get_snapshot_cr(snapshot_name)
-        conflict = self._validate_existing_source(current, sandbox_id)
-        if conflict is not None:
-            return conflict
+        if should_validate_existing_source:
+            try:
+                current = self._get_snapshot_cr(snapshot_name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to inspect existing Kubernetes SandboxSnapshot %s after create conflict: %s",
+                    snapshot_name,
+                    exc,
+                )
+            else:
+                conflict = self._validate_existing_source(current, sandbox_id)
+                if conflict is not None:
+                    return conflict
 
         return self._wait_for_terminal_snapshot(snapshot_id)
 
@@ -144,10 +155,10 @@ class KubernetesSnapshotRuntime:
         try:
             snapshot = self._get_snapshot_cr(snapshot_name)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to inspect Kubernetes SandboxSnapshot %s: %s", snapshot_name, exc)
+            logger.warning("Failed to inspect Kubernetes SandboxSnapshot %s: %s", snapshot_name, exc)
             return SnapshotRuntimeStatus(
-                state=SnapshotState.FAILED,
-                reason="snapshot_recovery_inspect_failed",
+                state=SnapshotState.CREATING,
+                reason="snapshot_runtime_inspect_failed",
                 message=f"Failed to inspect Kubernetes SandboxSnapshot {snapshot_name}: {exc}",
             )
 
