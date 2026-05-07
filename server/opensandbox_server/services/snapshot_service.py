@@ -196,9 +196,6 @@ class PersistedSnapshotService(SnapshotService):
                 },
             )
 
-        if record.status.state == SnapshotState.DELETING:
-            return
-
         if record.status.state == SnapshotState.CREATING:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -207,6 +204,11 @@ class PersistedSnapshotService(SnapshotService):
                     "message": f"Snapshot {snapshot_id} is still being created and cannot be deleted",
                 },
             )
+
+        if record.status.state != SnapshotState.DELETING:
+            record = self._mark_snapshot_deleting(record)
+            if record is None:
+                return
 
         self._snapshot_runtime.delete_snapshot(
             snapshot_id,
@@ -229,6 +231,43 @@ class PersistedSnapshotService(SnapshotService):
         from opensandbox_server.api.schema import PaginationRequest
 
         return PaginationRequest()
+
+    def _mark_snapshot_deleting(self, record: SnapshotRecord) -> SnapshotRecord | None:
+        now = datetime.now(timezone.utc)
+        deleting_record = SnapshotRecord(
+            id=record.id,
+            source_sandbox_id=record.source_sandbox_id,
+            name=record.name,
+            description=record.description,
+            restore_config=record.restore_config,
+            status=SnapshotStatusRecord(
+                state=SnapshotState.DELETING,
+                reason="snapshot_delete_requested",
+                message="Snapshot deletion requested.",
+                last_transition_at=now,
+            ),
+            created_at=record.created_at,
+            updated_at=now,
+        )
+        if self._snapshot_repository.update_if_state(
+            deleting_record,
+            record.status.state,
+        ):
+            return deleting_record
+
+        current_record = self._snapshot_repository.get(record.id)
+        if current_record is None:
+            return None
+        if current_record.status.state == SnapshotState.DELETING:
+            return current_record
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SNAPSHOT::INVALID_STATE",
+                "message": f"Snapshot {record.id} changed state and cannot be deleted",
+            },
+        )
 
     def _create_snapshot_worker(self, record: SnapshotRecord) -> None:
         try:

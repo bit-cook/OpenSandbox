@@ -381,7 +381,14 @@ def test_snapshot_service_deletes_runtime_artifact_before_metadata(tmp_path) -> 
         runtime.calls.append((snapshot_id, sandbox_id))
         return ready_status
 
+    def delete_snapshot(snapshot_id: str, image: str | None = None) -> None:
+        stored = repo.get(snapshot_id)
+        assert stored is not None
+        assert stored.status.state == SnapshotState.DELETING
+        runtime.delete_calls.append((snapshot_id, image))
+
     runtime.create_snapshot = create_snapshot
+    runtime.delete_snapshot = delete_snapshot
     created = service.create_snapshot("sbx-001", CreateSnapshotRequest(name="checkpoint"))
 
     service.delete_snapshot(created.id)
@@ -420,8 +427,49 @@ def test_snapshot_service_propagates_snapshot_delete_conflict(tmp_path) -> None:
     with pytest.raises(HTTPException) as exc_info:
         service.delete_snapshot("snap-in-use")
 
+    stored = repo.get("snap-in-use")
     assert exc_info.value.status_code == 409
-    assert repo.get("snap-in-use") is not None
+    assert stored is not None
+    assert stored.status.state == SnapshotState.DELETING
+
+
+def test_snapshot_service_recovers_delete_after_runtime_cleanup_succeeds(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=ImmediateExecutor(),
+    )
+
+    record = _snapshot_record(
+        "snap-delete-crash",
+        SnapshotState.READY,
+        image="opensandbox-snapshots:snap-delete-crash",
+    )
+    repo.create(record)
+
+    original_delete = repo.delete
+
+    def crash_delete(snapshot_id: str) -> None:
+        raise RuntimeError("simulated metadata delete crash")
+
+    repo.delete = crash_delete
+    with pytest.raises(RuntimeError, match="simulated metadata delete crash"):
+        service.delete_snapshot("snap-delete-crash")
+
+    stored = repo.get("snap-delete-crash")
+    assert stored is not None
+    assert stored.status.state == SnapshotState.DELETING
+    assert runtime.delete_calls == [("snap-delete-crash", "opensandbox-snapshots:snap-delete-crash")]
+
+    repo.delete = original_delete
+    recovery_runtime = StubSnapshotRuntime()
+    PersistedSnapshotService(repo, StubSandboxService(), snapshot_runtime=recovery_runtime)
+
+    assert recovery_runtime.delete_calls == [("snap-delete-crash", "opensandbox-snapshots:snap-delete-crash")]
+    assert repo.get("snap-delete-crash") is None
 
 
 def test_snapshot_service_worker_cleans_up_snapshot_deleted_during_creation(tmp_path) -> None:
