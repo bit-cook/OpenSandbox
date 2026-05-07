@@ -68,6 +68,24 @@ async def test_async_acquire_direct_create_when_empty() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_acquire_direct_create_kills_and_closes_when_renew_fails() -> None:
+    FakeAsyncSandbox.reset()
+    FakeAsyncSandbox.fail_renew = True
+    pool = _create_pool(max_idle=0)
+    await pool.start()
+
+    try:
+        with pytest.raises(RuntimeError, match="renew failed"):
+            await pool.acquire(sandbox_timeout=timedelta(minutes=5))
+        assert FakeAsyncSandbox.last_created is not None
+        assert FakeAsyncSandbox.last_created.killed
+        assert FakeAsyncSandbox.last_created.closed
+    finally:
+        FakeAsyncSandbox.fail_renew = False
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
 async def test_async_acquire_when_stopped_raises_pool_not_running() -> None:
     pool = _create_pool(max_idle=0)
 
@@ -297,6 +315,8 @@ class FakeAsyncManager:
 
 class FakeAsyncSandbox:
     created_count = 0
+    fail_renew = False
+    last_created: FakeAsyncSandbox | None = None
 
     def __init__(self, sandbox_id: str) -> None:
         self.id = sandbox_id
@@ -307,11 +327,15 @@ class FakeAsyncSandbox:
     @classmethod
     def reset(cls) -> None:
         cls.created_count = 0
+        cls.fail_renew = False
+        cls.last_created = None
 
     @classmethod
     async def create(cls, *args: Any, **kwargs: Any) -> FakeAsyncSandbox:
         cls.created_count += 1
-        return cls(f"created-{cls.created_count}")
+        sandbox = cls(f"created-{cls.created_count}")
+        cls.last_created = sandbox
+        return sandbox
 
     @classmethod
     async def connect(cls, sandbox_id: str, *args: Any, **kwargs: Any) -> FakeAsyncSandbox:
@@ -320,6 +344,8 @@ class FakeAsyncSandbox:
         return cls(sandbox_id)
 
     async def renew(self, timeout: timedelta) -> None:
+        if self.fail_renew:
+            raise RuntimeError("renew failed")
         self.renewed.append(timeout)
 
     async def kill(self) -> None:

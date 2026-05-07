@@ -60,6 +60,23 @@ def test_acquire_direct_create_when_empty() -> None:
         pool.shutdown(False)
 
 
+def test_acquire_direct_create_kills_and_closes_when_renew_fails() -> None:
+    FakeSandbox.reset()
+    FakeSandbox.fail_renew = True
+    pool = _create_pool(max_idle=0)
+    pool.start()
+
+    try:
+        with pytest.raises(RuntimeError, match="renew failed"):
+            pool.acquire(sandbox_timeout=timedelta(minutes=5))
+        assert FakeSandbox.last_created is not None
+        assert FakeSandbox.last_created.killed
+        assert FakeSandbox.last_created.closed
+    finally:
+        FakeSandbox.fail_renew = False
+        pool.shutdown(False)
+
+
 def test_acquire_when_stopped_raises_pool_not_running() -> None:
     pool = _create_pool(max_idle=0)
 
@@ -274,6 +291,8 @@ class FakeManager:
 
 class FakeSandbox:
     created_count = 0
+    fail_renew = False
+    last_created: FakeSandbox | None = None
 
     def __init__(self, sandbox_id: str) -> None:
         self.id = sandbox_id
@@ -284,11 +303,15 @@ class FakeSandbox:
     @classmethod
     def reset(cls) -> None:
         cls.created_count = 0
+        cls.fail_renew = False
+        cls.last_created = None
 
     @classmethod
     def create(cls, *args: Any, **kwargs: Any) -> FakeSandbox:
         cls.created_count += 1
-        return cls(f"created-{cls.created_count}")
+        sandbox = cls(f"created-{cls.created_count}")
+        cls.last_created = sandbox
+        return sandbox
 
     @classmethod
     def connect(cls, sandbox_id: str, *args: Any, **kwargs: Any) -> FakeSandbox:
@@ -297,6 +320,8 @@ class FakeSandbox:
         return cls(sandbox_id)
 
     def renew(self, timeout: timedelta) -> None:
+        if self.fail_renew:
+            raise RuntimeError("renew failed")
         self.renewed.append(timeout)
 
     def kill(self) -> None:

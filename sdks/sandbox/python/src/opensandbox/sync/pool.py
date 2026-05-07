@@ -410,7 +410,14 @@ class SandboxPoolSync:
             skip_health_check=self._config.acquire_skip_health_check,
         )
         if sandbox_timeout is not None:
-            sandbox.renew(sandbox_timeout)
+            try:
+                sandbox.renew(sandbox_timeout)
+            except BaseException:
+                try:
+                    sandbox.kill()
+                finally:
+                    sandbox.close()
+                raise
         return sandbox
 
     def _resolve_max_idle(self) -> int:
