@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class ReconcileState:
     degraded_threshold: int
     backoff_base: timedelta = timedelta(seconds=1)
-    backoff_max: timedelta = timedelta(seconds=60)
+    backoff_max: timedelta = timedelta(days=1)
     failure_count: int = 0
     state: PoolState = PoolState.HEALTHY
     last_error: str | None = None
@@ -53,7 +53,7 @@ class ReconcileState:
         if self.failure_count >= self.degraded_threshold:
             self.state = PoolState.DEGRADED
             self.backoff_attempts += 1
-            exponent = min(self.backoff_attempts, 10)
+            exponent = min(self.backoff_attempts, 30)
             delay = min(
                 self.backoff_base.total_seconds() * (1 << exponent),
                 self.backoff_max.total_seconds(),

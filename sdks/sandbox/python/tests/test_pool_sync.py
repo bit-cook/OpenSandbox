@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import httpx
 import pytest
 
+from opensandbox._pool_reconciler import ReconcileState
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import (
     PoolAcquireFailedException,
@@ -17,6 +18,17 @@ from opensandbox.exceptions import (
 from opensandbox.models.sandboxes import PlatformSpec
 from opensandbox.pool import AcquirePolicy, InMemoryPoolStateStore, PoolCreationSpec
 from opensandbox.sync.pool import SandboxPoolSync
+
+
+def test_degraded_backoff_caps_at_one_day() -> None:
+    state = ReconcileState(degraded_threshold=1)
+
+    for _ in range(20):
+        state.record_failure("boom")
+
+    assert state.failure_count == 20
+    assert state.is_backoff_active(datetime.now(timezone.utc) + timedelta(hours=23))
+    assert not state.is_backoff_active(datetime.now(timezone.utc) + timedelta(hours=25))
 
 
 def test_acquire_fail_fast_empty_raises_pool_empty() -> None:
