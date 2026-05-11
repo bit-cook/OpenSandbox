@@ -38,6 +38,8 @@ from .network_rule_action import NetworkRuleAction
 from .ossfs import OSSFS
 from .ossfs_version import OSSFSVersion
 from .pagination_info import PaginationInfo
+from .patch_sandbox_request import PatchSandboxRequest
+from .patch_sandbox_request_metadata import PatchSandboxRequestMetadata
 from .platform_spec import PlatformSpec
 from .platform_spec_arch import PlatformSpecArch
 from .platform_spec_os import PlatformSpecOs
@@ -75,6 +77,8 @@ __all__ = (
     "OSSFS",
     "OSSFSVersion",
     "PaginationInfo",
+    "PatchSandboxRequest",
+    "PatchSandboxRequestMetadata",
     "PlatformSpec",
     "PlatformSpecArch",
     "PlatformSpecOs",
