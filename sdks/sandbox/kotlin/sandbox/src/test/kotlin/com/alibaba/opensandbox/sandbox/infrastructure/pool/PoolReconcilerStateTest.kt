@@ -57,6 +57,49 @@ class PoolReconcilerStateTest {
     }
 
     @Test
+    fun `default degraded backoff starts at thirty seconds`() {
+        val state = ReconcileState(degradedThreshold = 1)
+
+        state.recordFailure("boom")
+
+        assertEquals(true, state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(29))))
+        assertFalse(state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(31))))
+    }
+
+    @Test
+    fun `reconcile batch failures only advance backoff once`() {
+        val stateStore = InMemoryPoolStateStore()
+        val config =
+            PoolConfig.builder()
+                .poolName("pool-batch-failure-test")
+                .ownerId("owner-1")
+                .maxIdle(10)
+                .warmupConcurrency(10)
+                .stateStore(stateStore)
+                .connectionConfig(ConnectionConfig.builder().build())
+                .creationSpec(PoolCreationSpec.builder().image("ubuntu:22.04").build())
+                .build()
+        val state = ReconcileState(degradedThreshold = 3)
+        val warmupExecutor = Executors.newFixedThreadPool(10)
+
+        try {
+            PoolReconciler.runReconcileTick(
+                config = config,
+                stateStore = stateStore,
+                createOne = { throw RuntimeException("boom") },
+                reconcileState = state,
+                warmupExecutor = warmupExecutor,
+            )
+        } finally {
+            warmupExecutor.shutdownNow()
+        }
+
+        assertEquals(10, state.failureCount)
+        assertEquals(true, state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(29))))
+        assertFalse(state.isBackoffActive(Instant.now().plus(Duration.ofSeconds(31))))
+    }
+
+    @Test
     fun `reconcile create exception increments failure count once per task`() {
         val stateStore = InMemoryPoolStateStore()
         val config =

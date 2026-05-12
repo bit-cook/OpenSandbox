@@ -24,7 +24,7 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.diagnostic_content_response import DiagnosticContentResponse
 from ...models.error_response import ErrorResponse
-from ...types import Response
+from ...types import UNSET, Response
 
 
 def _get_kwargs(
@@ -36,7 +36,7 @@ def _get_kwargs(
 
     params["scope"] = scope
 
-    params = {k: v for k, v in params.items() if v is not None}
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "get",
@@ -129,7 +129,7 @@ def sync_detailed(
 
     Args:
         sandbox_id (str):
-        scope (str | Unset):
+        scope (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -176,7 +176,7 @@ def sync(
 
     Args:
         sandbox_id (str):
-        scope (str | Unset):
+        scope (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -218,7 +218,7 @@ async def asyncio_detailed(
 
     Args:
         sandbox_id (str):
-        scope (str | Unset):
+        scope (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -263,7 +263,7 @@ async def asyncio(
 
     Args:
         sandbox_id (str):
-        scope (str | Unset):
+        scope (str):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
