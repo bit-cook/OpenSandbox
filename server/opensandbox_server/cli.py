@@ -288,17 +288,11 @@ def main() -> None:
 
     # Load config + logging without importing opensandbox_server.main: importing
     # main eagerly constructs sandbox_service (restoring containers and starting
-    # expiration timers) in this process. With workers > 1 that leaks timers to
-    # the uvicorn supervisor and (on spawn) duplicates them across workers.
+    # expiration timers), which we defer to the actual worker process so the
+    # uvicorn reloader supervisor does not run them.
     app_config = load_config()
     log_config = configure_logging(app_config.log)
     server_cfg = app_config.server
-
-    workers = 1 if args.reload else server_cfg.workers
-    if args.reload and server_cfg.workers > 1:
-        print(
-            f"--reload set; ignoring workers={server_cfg.workers}, using 1\n"
-        )
 
     uvicorn.run(
         "opensandbox_server.main:app",
@@ -307,7 +301,6 @@ def main() -> None:
         reload=args.reload,
         log_config=log_config,
         timeout_keep_alive=server_cfg.timeout_keep_alive,
-        workers=workers,
         limit_concurrency=server_cfg.limit_concurrency,
         backlog=server_cfg.backlog,
         loop=server_cfg.loop,

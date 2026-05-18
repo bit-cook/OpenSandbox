@@ -159,39 +159,14 @@ def test_docker_runtime_disallows_kubernetes_block():
         AppConfig(server=server_cfg, runtime=runtime_cfg, kubernetes=kubernetes_cfg)
 
 
-def test_docker_runtime_rejects_multiple_workers():
-    """Docker runtime keeps expiration timers in process-local state, so
-    workers > 1 would race on renew_expiration and expire renewed sandboxes
-    early. Reject the combination at config validation time."""
-    server_cfg = ServerConfig(workers=2)
-    runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")
-    with pytest.raises(ValueError, match="server.workers must be 1"):
-        AppConfig(server=server_cfg, runtime=runtime_cfg)
-
-
-def test_docker_runtime_allows_single_worker():
-    server_cfg = ServerConfig(workers=1)
-    runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")
-    cfg = AppConfig(server=server_cfg, runtime=runtime_cfg)
-    assert cfg.server.workers == 1
-
-
-def test_kubernetes_runtime_allows_multiple_workers():
-    server_cfg = ServerConfig(workers=4)
-    runtime_cfg = RuntimeConfig(type="kubernetes", execd_image="busybox:latest")
-    cfg = AppConfig(server=server_cfg, runtime=runtime_cfg)
-    assert cfg.server.workers == 4
-
-
 def test_server_config_defaults_include_max_sandbox_timeout():
     server_cfg = ServerConfig()
     assert server_cfg.max_sandbox_timeout_seconds is None
 
 
 def test_server_config_uvicorn_tuning_defaults():
-    """ServerConfig exposes uvicorn worker/concurrency knobs with sensible defaults."""
+    """ServerConfig exposes uvicorn concurrency knobs with sensible defaults."""
     server_cfg = ServerConfig()
-    assert server_cfg.workers == 1
     assert server_cfg.limit_concurrency == 1024
     assert server_cfg.backlog == 2048
     assert server_cfg.thread_pool_size == 200
@@ -201,29 +176,34 @@ def test_server_config_uvicorn_tuning_defaults():
 
 def test_server_config_uvicorn_tuning_overrides():
     server_cfg = ServerConfig(
-        workers=8,
         limit_concurrency=256,
         backlog=4096,
         loop="uvloop",
         http="httptools",
     )
-    assert server_cfg.workers == 8
     assert server_cfg.limit_concurrency == 256
     assert server_cfg.backlog == 4096
     assert server_cfg.loop == "uvloop"
     assert server_cfg.http == "httptools"
 
 
-def test_server_config_workers_must_be_positive():
-    with pytest.raises(ValidationError):
-        ServerConfig(workers=0)
+def test_server_config_limit_concurrency_zero_disables_cap():
+    """0 is the TOML-friendly disable sentinel and must collapse to None so
+    uvicorn applies no concurrency limit."""
+    cfg = ServerConfig(limit_concurrency=0)
+    assert cfg.limit_concurrency is None
 
 
-def test_server_config_limit_concurrency_must_be_positive_when_set():
-    with pytest.raises(ValidationError):
-        ServerConfig(limit_concurrency=0)
+def test_server_config_limit_concurrency_accepts_none_and_positive():
     cfg = ServerConfig(limit_concurrency=None)
     assert cfg.limit_concurrency is None
+    cfg = ServerConfig(limit_concurrency=512)
+    assert cfg.limit_concurrency == 512
+
+
+def test_server_config_limit_concurrency_rejects_negative():
+    with pytest.raises(ValidationError):
+        ServerConfig(limit_concurrency=-1)
 
 
 def test_server_config_backlog_must_be_positive():

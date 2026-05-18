@@ -66,8 +66,7 @@ Example files in this repository:
 | `eip` | string \| omitted | `null` | Public IP or hostname used as the **host part** when the server returns sandbox endpoint URLs (notably Docker runtime). |
 | `max_sandbox_timeout_seconds` | integer \| omitted | `null` | Upper bound on sandbox TTL in seconds for **create** requests that specify `timeout`. Must be ≥ **60** if set. Omit to disable the server-side cap. |
 | `timeout_keep_alive` | integer | `30` | Idle keep-alive timeout (seconds) passed to uvicorn. |
-| `workers` | integer | `1` | Number of uvicorn worker processes. Each worker is a separate Python process with its own event loop and (under the Kubernetes runtime) its own informer watch streams to the apiserver. Default `1` keeps apiserver pressure predictable; bump to 2–8 based on CPU quota and apiserver capacity. Ignored when `--reload` is set. **Must be `1` when `runtime.type = "docker"`** — Docker expiration timers are per-process, so multiple workers race on renewals and can expire renewed sandboxes early. |
-| `limit_concurrency` | integer \| omitted | `1024` | Maximum concurrent connections per worker before returning 503. Provides backpressure protection under burst load. Omit to disable. |
+| `limit_concurrency` | integer | `1024` | Maximum concurrent connections before returning 503. Provides backpressure protection under burst load. Set to `0` to disable the cap (TOML cannot express `null`). |
 | `backlog` | integer | `2048` | Socket listen backlog passed to uvicorn. |
 | `thread_pool_size` | integer | `200` | Maximum size of the anyio default threadpool used by FastAPI to run sync route handlers. The anyio default of 40 throttles bursts of blocking sandbox list/get/delete operations under high concurrency. |
 | `loop` | `"auto"` \| `"uvloop"` \| `"asyncio"` | `"auto"` | Event loop implementation. `auto` prefers uvloop and falls back to asyncio. |

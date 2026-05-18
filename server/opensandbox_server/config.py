@@ -453,27 +453,23 @@ class ServerConfig(BaseModel):
             "Connections idle longer than this may be closed by the server."
         ),
     )
-    workers: int = Field(
-        default=1,
-        ge=1,
-        description=(
-            "Number of uvicorn worker processes. Each worker is a separate "
-            "Python process with its own event loop and (under the Kubernetes "
-            "runtime) its own informer watch streams to the apiserver. "
-            "Default 1 to keep apiserver pressure predictable; bump to 2-8 "
-            "based on CPU quota and apiserver capacity. Ignored when "
-            "--reload is set. Must be 1 when runtime.type = 'docker' "
-            "because Docker expiration timers live in process-local state."
-        ),
-    )
     limit_concurrency: Optional[int] = Field(
         default=1024,
-        ge=1,
+        ge=0,
         description=(
-            "Maximum concurrent connections per worker before returning 503. "
-            "Set null to disable. Provides backpressure protection under burst load."
+            "Maximum concurrent connections before returning 503. "
+            "Set to 0 to disable (TOML cannot express null). "
+            "Provides backpressure protection under burst load."
         ),
     )
+
+    @field_validator("limit_concurrency", mode="after")
+    @classmethod
+    def _zero_disables_limit_concurrency(cls, value: Optional[int]) -> Optional[int]:
+        # Translate the TOML-friendly sentinel 0 into None so uvicorn applies
+        # no concurrency cap. TOML has no null literal, so 0 is the only way
+        # to disable the limit from the config file.
+        return None if value == 0 else value
     backlog: int = Field(
         default=2048,
         ge=1,
@@ -897,21 +893,6 @@ class AppConfig(BaseModel):
                 raise ValueError("ingress.mode must be 'direct' when runtime.type = 'docker'.")
             if self.secure_runtime is not None and self.secure_runtime.type == "firecracker":
                 raise ValueError( "secure_runtime.type 'firecracker' is only compatible with runtime.type='kubernetes'.")
-            # The Docker service tracks sandbox expirations with in-process
-            # threading.Timer objects keyed by sandbox_id. Each uvicorn worker
-            # would build an independent DockerSandboxService with its own
-            # timers, so a renewal handled by one worker would not cancel the
-            # stale timer in another worker — that worker would still expire
-            # the sandbox at the pre-renewal time. Refuse to start until the
-            # operator either drops back to a single worker or the Docker
-            # runtime grows shared expiration state.
-            if self.server.workers > 1:
-                raise ValueError(
-                    "server.workers must be 1 when runtime.type = 'docker'; "
-                    "Docker expiration timers are per-process, so multiple "
-                    "workers can race on renew_expiration and expire renewed "
-                    "sandboxes early."
-                )
         elif self.runtime.type == "kubernetes":
             if self.kubernetes is None:
                 self.kubernetes = KubernetesRuntimeConfig()
