@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunInSessionRequest
 import java.time.Duration
+import kotlin.time.toJavaDuration
 
 /**
  * Command execution operations for sandbox environments.
@@ -123,6 +124,23 @@ interface Commands {
                 .timeout(timeout)
                 .build(),
         )
+    }
+
+    @Deprecated(
+        message = "Use java.time.Duration instead.",
+        replaceWith =
+            ReplaceWith(
+                "runInSession(sessionId, command, workingDirectory, timeout.toJavaDuration())",
+                "kotlin.time.toJavaDuration",
+            ),
+    )
+    fun runInSession(
+        sessionId: String,
+        command: String,
+        workingDirectory: String? = null,
+        timeout: kotlin.time.Duration,
+    ): Execution {
+        return runInSession(sessionId, command, workingDirectory, timeout.toJavaDuration())
     }
 
     /**
