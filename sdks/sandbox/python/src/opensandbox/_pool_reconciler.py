@@ -27,6 +27,8 @@ from opensandbox.pool_types import (
     PoolConfig,
     PoolState,
     PoolStateStore,
+)
+from opensandbox.pool_types import (
     reap_expired_idle_with_min_ttl as _reap_expired_idle_with_min_ttl,
 )
 

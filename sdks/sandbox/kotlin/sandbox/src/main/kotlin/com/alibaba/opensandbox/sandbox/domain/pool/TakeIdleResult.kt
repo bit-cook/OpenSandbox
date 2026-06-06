@@ -37,7 +37,6 @@ data class TakeIdleResult(
         val EMPTY: TakeIdleResult = TakeIdleResult(sandboxId = null)
 
         @JvmStatic
-        fun of(sandboxId: String?): TakeIdleResult =
-            if (sandboxId == null) EMPTY else TakeIdleResult(sandboxId)
+        fun of(sandboxId: String?): TakeIdleResult = if (sandboxId == null) EMPTY else TakeIdleResult(sandboxId)
     }
 }

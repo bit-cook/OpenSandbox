@@ -38,8 +38,10 @@ from opensandbox.pool_types import (
     PoolCreationSpec,
     PoolLifecycleState,
     PoolSnapshot,
-    try_take_idle_with_min_ttl as _try_take_idle_with_min_ttl,
     PoolState,
+)
+from opensandbox.pool_types import (
+    try_take_idle_with_min_ttl as _try_take_idle_with_min_ttl,
 )
 from opensandbox.sync.manager import SandboxManagerSync
 from opensandbox.sync.sandbox import SandboxSync

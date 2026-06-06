@@ -82,9 +82,11 @@ class RedisPoolStateStore(
 
     /**
      * Decodes the Lua return value into [TakeIdleResult]. The script returns either nil (empty
-     * pool with no discarded entries) or a two-element array `{takenSandboxId | "", [discardedAliveIds...]}`.
-     * "" is used in slot 0 when no entry satisfied the threshold but discarded-alive IDs still need
-     * to be reported (Redis cannot return a nil literal inside an array reliably across clients).
+     * pool with no discarded entries) or a two-element array whose first slot holds the taken
+     * sandbox id (or an empty string when no entry satisfied the threshold but discarded-alive
+     * ids still need to be reported) and whose second slot holds the discarded-alive list.
+     * The empty-string sentinel is needed because Redis cannot return a nil literal inside an
+     * array reliably across clients.
      */
     @Suppress("UNCHECKED_CAST")
     private fun decodeTakeIdleResult(result: Any?): TakeIdleResult {

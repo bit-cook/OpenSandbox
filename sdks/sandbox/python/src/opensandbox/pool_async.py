@@ -41,6 +41,8 @@ from opensandbox.pool_types import (
     PoolLifecycleState,
     PoolSnapshot,
     PoolState,
+)
+from opensandbox.pool_types import (
     try_take_idle_with_min_ttl_async as _try_take_idle_with_min_ttl_async,
 )
 from opensandbox.sandbox import Sandbox
@@ -552,7 +554,7 @@ class SandboxPoolAsync:
             *(self._kill_sandbox_best_effort(sandbox_id) for sandbox_id in sandbox_ids),
             return_exceptions=False,
         )
-        for sandbox_id, killed in zip(sandbox_ids, results):
+        for sandbox_id, killed in zip(sandbox_ids, results, strict=True):
             if killed:
                 logger.debug(
                     "Killed near-expiry idle sandbox: pool_name=%s sandbox_id=%s source=%s",

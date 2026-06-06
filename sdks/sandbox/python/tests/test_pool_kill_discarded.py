@@ -271,7 +271,7 @@ def test_sync_schedule_kill_discarded_alive_does_not_block_caller() -> None:
 class _RenewTrackingSyncSandbox:
     """Minimal SandboxSync stand-in that records every ``renew`` call."""
 
-    last_instance: "_RenewTrackingSyncSandbox | None" = None
+    last_instance: _RenewTrackingSyncSandbox | None = None
 
     def __init__(self, sandbox_id: str = "warm-1") -> None:
         self.id = sandbox_id
@@ -281,7 +281,7 @@ class _RenewTrackingSyncSandbox:
         type(self).last_instance = self
 
     @classmethod
-    def create(cls, *args: Any, **kwargs: Any) -> "_RenewTrackingSyncSandbox":
+    def create(cls, *args: Any, **kwargs: Any) -> _RenewTrackingSyncSandbox:
         del args, kwargs
         return cls("warm-1")
 
@@ -333,7 +333,7 @@ def test_sync_create_one_sandbox_renews_before_returning_id() -> None:
 
 
 class _RenewTrackingAsyncSandbox:
-    last_instance: "_RenewTrackingAsyncSandbox | None" = None
+    last_instance: _RenewTrackingAsyncSandbox | None = None
 
     def __init__(self, sandbox_id: str = "warm-1") -> None:
         self.id = sandbox_id
@@ -343,7 +343,7 @@ class _RenewTrackingAsyncSandbox:
         type(self).last_instance = self
 
     @classmethod
-    async def create(cls, *args: Any, **kwargs: Any) -> "_RenewTrackingAsyncSandbox":
+    async def create(cls, *args: Any, **kwargs: Any) -> _RenewTrackingAsyncSandbox:
         del args, kwargs
         return cls("warm-1")
 

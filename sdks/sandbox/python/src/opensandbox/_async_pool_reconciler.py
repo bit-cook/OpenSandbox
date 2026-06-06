@@ -26,6 +26,8 @@ from opensandbox._pool_reconciler import ReconcileState
 from opensandbox.pool_types import (
     AsyncPoolConfig,
     AsyncPoolStateStore,
+)
+from opensandbox.pool_types import (
     reap_expired_idle_with_min_ttl_async as _reap_expired_idle_with_min_ttl_async,
 )
 

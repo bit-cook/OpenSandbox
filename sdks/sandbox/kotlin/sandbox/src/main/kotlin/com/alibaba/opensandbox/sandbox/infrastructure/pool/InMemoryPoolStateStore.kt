@@ -67,10 +67,11 @@ class InMemoryPoolStateStore : PoolStateStore {
         val cutoff = now.plus(minRemainingTtl)
         var discardedAlive: MutableList<String>? = null
         while (true) {
-            val sandboxId = state.queue.poll() ?: return TakeIdleResult(
-                sandboxId = null,
-                discardedAliveSandboxIds = discardedAlive ?: emptyList(),
-            )
+            val sandboxId =
+                state.queue.poll() ?: return TakeIdleResult(
+                    sandboxId = null,
+                    discardedAliveSandboxIds = discardedAlive ?: emptyList(),
+                )
             val entry = state.map.remove(sandboxId) ?: continue // already removed (e.g. by removeIdle)
             if (entry.expiresAt.isAfter(cutoff)) {
                 return TakeIdleResult(
