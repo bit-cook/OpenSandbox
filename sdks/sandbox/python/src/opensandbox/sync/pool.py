@@ -182,9 +182,10 @@ class SandboxPoolSync:
                 self._config.acquire_min_remaining_ttl,
             )
             sandbox_id = take_result.sandbox_id
-            self._kill_discarded_alive(
-                pool_name, take_result.discarded_alive_sandbox_ids, source="acquire"
-            )
+            # Defer cleanup of below-threshold-but-still-alive sandboxes until after the chosen
+            # candidate is connected and renewed. Doing it inline before connect would let slow
+            # kill RPCs eat the candidate's remaining TTL — exactly the race this PR is fixing.
+            pending_kill = take_result.discarded_alive_sandbox_ids
             no_idle_reason: str | None = None
             idle_connect_failure: Exception | None = None
             if sandbox_id is not None:
@@ -201,6 +202,12 @@ class SandboxPoolSync:
                     )
                     if sandbox_timeout is not None:
                         sandbox.renew(sandbox_timeout)
+                    # Candidate is connected and (optionally) renewed. Now safe to clean up the
+                    # discarded-alive sandboxes; offload to the warmup executor so the caller
+                    # does not wait for N kill RPCs.
+                    self._schedule_kill_discarded_alive(
+                        pool_name, pending_kill, source="acquire"
+                    )
                     return sandbox
                 except Exception as exc:
                     idle_connect_failure = exc
@@ -217,6 +224,11 @@ class SandboxPoolSync:
             else:
                 no_idle_reason = "idle buffer empty"
 
+            # Reaching here means we did not return a sandbox from idle. Still kick off the
+            # deferred cleanup so the discarded-alive sandboxes do not linger.
+            self._schedule_kill_discarded_alive(
+                pool_name, pending_kill, source="acquire"
+            )
             reason = no_idle_reason or "idle buffer empty"
             if policy == AcquirePolicy.FAIL_FAST:
                 if sandbox_id is not None:
@@ -369,6 +381,12 @@ class SandboxPoolSync:
                     except Exception:
                         pass
                     return None
+                # The server-side TTL has been ticking since `_build_sandbox_from_spec()`;
+                # readiness wait and `warmup_sandbox_preparer` can both consume meaningful time.
+                # Renew right before handing the id back to the reconciler so the store's
+                # stamped expiry actually matches what the server will honor — otherwise
+                # `acquire_min_remaining_ttl` overestimates remaining TTL by the warmup duration.
+                sandbox.renew(self._config.idle_timeout)
                 return sandbox.id
             except Exception:
                 try:
@@ -467,6 +485,35 @@ class SandboxPoolSync:
                 exc,
             )
             return False
+
+    def _schedule_kill_discarded_alive(
+        self,
+        pool_name: str,
+        sandbox_ids: tuple[str, ...],
+        source: str,
+    ) -> None:
+        """Offload :meth:`_kill_discarded_alive` to the warmup executor so the caller does not
+        block on the kill RPCs. Falls back to inline execution when no executor is available
+        (e.g. mid-shutdown) — better to slow the caller than to drop the cleanup entirely.
+        """
+        if not sandbox_ids:
+            return
+        executor = self._warmup_executor
+        if executor is None:
+            self._kill_discarded_alive(pool_name, sandbox_ids, source)
+            return
+        try:
+            executor.submit(
+                self._kill_discarded_alive, pool_name, sandbox_ids, source
+            )
+        except Exception as exc:
+            logger.debug(
+                "Discarded-alive kill submit rejected, running inline: pool_name=%s count=%d error=%s",
+                pool_name,
+                len(sandbox_ids),
+                exc,
+            )
+            self._kill_discarded_alive(pool_name, sandbox_ids, source)
 
     def _kill_discarded_alive(
         self,

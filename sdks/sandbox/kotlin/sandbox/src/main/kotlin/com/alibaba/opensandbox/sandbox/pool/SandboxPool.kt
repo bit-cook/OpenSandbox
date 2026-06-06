@@ -211,7 +211,11 @@ class SandboxPool internal constructor(
             val poolName = config.poolName
             val takeResult = stateStore.tryTakeIdle(poolName, config.acquireMinRemainingTtl)
             val sandboxId = takeResult.sandboxId
-            killDiscardedAlive(poolName, takeResult.discardedAliveSandboxIds, source = "acquire")
+            // Defer the cleanup of below-threshold-but-still-alive sandboxes until after the
+            // chosen candidate is connected and renewed. Doing it inline (synchronously, before
+            // connect) would let slow kill RPCs eat the candidate's remaining TTL — exactly the
+            // race this PR is trying to fix.
+            val pendingKill = takeResult.discardedAliveSandboxIds
             var noIdleReason: String? = null // null = got a sandbox from idle; non-null = reason we have no usable idle
             var idleConnectFailure: Exception? = null
             if (sandboxId != null) {
@@ -227,6 +231,10 @@ class SandboxPool internal constructor(
                                 config.acquireHealthCheck?.let { healthCheck(it) } ?: this
                             }.connect()
                     sandboxTimeout?.let { sandbox.renew(it) }
+                    // Candidate is connected and (optionally) renewed. Now safe to clean up the
+                    // discarded-alive sandboxes; offload to the warmup executor so the caller
+                    // does not wait for N kill RPCs.
+                    scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
                     logger.debug(
                         "Acquire from idle: pool_name={} sandbox_id={} policy={}",
                         poolName,
@@ -254,6 +262,11 @@ class SandboxPool internal constructor(
             } else {
                 noIdleReason = "idle buffer empty"
             }
+            // Reaching here means we did not return a sandbox from idle. Still kick off the
+            // deferred cleanup so the discarded-alive sandboxes do not linger; FAIL_FAST throws
+            // and DIRECT_CREATE falls through to a fresh sandbox creation, neither of which
+            // benefits from a synchronous kill.
+            scheduleKillDiscardedAlive(poolName, pendingKill, source = "acquire")
             val reason = noIdleReason!!
             if (policy == AcquirePolicy.FAIL_FAST) {
                 logger.debug("Acquire FAIL_FAST: pool_name={} reason={}", poolName, reason)
@@ -415,6 +428,38 @@ class SandboxPool internal constructor(
     private fun resolveMaxIdle(): Int = stateStore.getMaxIdle(config.poolName) ?: currentMaxIdle
 
     /**
+     * Offload [killDiscardedAlive] to the warmup executor so the caller does not block on the
+     * kill RPCs. Falls back to inline execution when no executor is available (e.g. the pool is
+     * shutting down) — better to slow the caller than to drop the cleanup entirely.
+     */
+    private fun scheduleKillDiscardedAlive(
+        poolName: String,
+        sandboxIds: List<String>,
+        source: String,
+    ) {
+        if (sandboxIds.isEmpty()) return
+        val executor = warmupExecutor
+        if (executor == null) {
+            killDiscardedAlive(poolName, sandboxIds, source)
+            return
+        }
+        try {
+            executor.submit {
+                killDiscardedAlive(poolName, sandboxIds, source)
+            }
+        } catch (e: Exception) {
+            // Executor may reject if the pool is mid-shutdown; fall back to inline kill.
+            logger.debug(
+                "Discarded-alive kill submit rejected, running inline: pool_name={} count={} error={}",
+                poolName,
+                sandboxIds.size,
+                e.message,
+            )
+            killDiscardedAlive(poolName, sandboxIds, source)
+        }
+    }
+
+    /**
      * Best-effort terminate sandboxes the store dropped because their remaining TTL fell below
      * `acquireMinRemainingTtl`. The store has already removed them from idle membership; without
      * this kill they would linger on the server until their TTL elapses, exceeding the intended
@@ -485,6 +530,13 @@ class SandboxPool internal constructor(
             val sandbox = buildSandboxFromSpec()
             try {
                 config.warmupSandboxPreparer?.prepare(sandbox)
+                // The server-side TTL has been ticking since `buildSandboxFromSpec()`; readiness
+                // wait and `warmupSandboxPreparer` can both consume meaningful time (think
+                // initialization scripts). Renew right before handing the id back to the
+                // reconciler so the store's stamped expiry (now + idleTimeout) actually matches
+                // what the server will honor — otherwise `acquireMinRemainingTtl` overestimates
+                // remaining TTL by the warmup duration.
+                sandbox.renew(config.idleTimeout)
                 sandbox.id
             } catch (e: Exception) {
                 try {

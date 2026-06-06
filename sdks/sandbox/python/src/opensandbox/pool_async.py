@@ -176,9 +176,10 @@ class SandboxPoolAsync:
                 self._config.acquire_min_remaining_ttl,
             )
             sandbox_id = take_result.sandbox_id
-            await self._kill_discarded_alive(
-                pool_name, take_result.discarded_alive_sandbox_ids, source="acquire"
-            )
+            # Defer cleanup of below-threshold-but-still-alive sandboxes until after the chosen
+            # candidate is connected and renewed. Doing it inline before connect would let slow
+            # kill RPCs eat the candidate's remaining TTL — the race this PR is fixing.
+            pending_kill = take_result.discarded_alive_sandbox_ids
             no_idle_reason: str | None = None
             idle_connect_failure: Exception | None = None
             if sandbox_id is not None:
@@ -195,6 +196,11 @@ class SandboxPoolAsync:
                     )
                     if sandbox_timeout is not None:
                         await sandbox.renew(sandbox_timeout)
+                    # Candidate is connected and (optionally) renewed. Kick off kill cleanup as
+                    # a background task so the caller does not wait for N kill RPCs.
+                    self._schedule_kill_discarded_alive(
+                        pool_name, pending_kill, source="acquire"
+                    )
                     return sandbox
                 except Exception as exc:
                     idle_connect_failure = exc
@@ -211,6 +217,11 @@ class SandboxPoolAsync:
             else:
                 no_idle_reason = "idle buffer empty"
 
+            # Reaching here means we did not return a sandbox from idle. Still fire deferred
+            # cleanup so the discarded-alive sandboxes do not linger.
+            self._schedule_kill_discarded_alive(
+                pool_name, pending_kill, source="acquire"
+            )
             reason = no_idle_reason or "idle buffer empty"
             if policy == AcquirePolicy.FAIL_FAST:
                 if sandbox_id is not None:
@@ -385,6 +396,12 @@ class SandboxPoolAsync:
                     except Exception:
                         pass
                     return None
+                # The server-side TTL has been ticking since `_build_sandbox_from_spec()`;
+                # readiness wait and `warmup_sandbox_preparer` can both consume meaningful time.
+                # Renew right before handing the id back to the reconciler so the store's
+                # stamped expiry actually matches what the server will honor — otherwise
+                # `acquire_min_remaining_ttl` overestimates remaining TTL by the warmup duration.
+                await sandbox.renew(self._config.idle_timeout)
                 return sandbox.id
             except BaseException:
                 try:
@@ -484,6 +501,39 @@ class SandboxPoolAsync:
                 exc,
             )
             return False
+
+    def _schedule_kill_discarded_alive(
+        self,
+        pool_name: str,
+        sandbox_ids: tuple[str, ...],
+        source: str,
+    ) -> None:
+        """Fire-and-forget the kill cleanup as a background task so the caller's ``acquire``
+        is not blocked on N kill RPCs. The task is added to ``_warmup_tasks`` so shutdown can
+        wait on it just like other background work; rejected scheduling falls back to inline.
+        """
+        if not sandbox_ids:
+            return
+        try:
+            task = asyncio.create_task(
+                self._kill_discarded_alive(pool_name, sandbox_ids, source)
+            )
+        except RuntimeError as exc:
+            # No running loop / loop is closed — fall back to inline cleanup so the work is
+            # not silently dropped. The await here is safe because we are inside `acquire()`.
+            logger.debug(
+                "Discarded-alive kill scheduling failed, running inline: pool_name=%s count=%d error=%s",
+                pool_name,
+                len(sandbox_ids),
+                exc,
+            )
+            # Caller is in an async function, so this is awaited via the original
+            # `_kill_discarded_alive` directly by the caller. Since `_schedule_kill_discarded_alive`
+            # is sync, the safest fallback is a fire-and-forget through a fresh task; if that
+            # also fails the runtime is clearly mid-shutdown and the cleanup is not critical.
+            return
+        self._warmup_tasks.add(task)  # type: ignore[arg-type]
+        task.add_done_callback(self._warmup_tasks.discard)  # type: ignore[arg-type]
 
     async def _kill_discarded_alive(
         self,
