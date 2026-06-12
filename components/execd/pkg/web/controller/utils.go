@@ -106,8 +106,7 @@ func SetFileOwnership(absPath string, owner string, group string) error {
 	}
 
 	if uid == -1 && gid == -1 {
-		uid = os.Getuid()
-		gid = os.Getgid()
+		return nil
 	}
 
 	if err := os.Chown(absPath, uid, gid); err != nil {
@@ -154,12 +153,19 @@ func MakeDir(dir string, perm model.Permission) error {
 	if err != nil {
 		return err
 	}
+
+	_, statErr := os.Stat(abs)
+	existed := statErr == nil
+
 	err = os.MkdirAll(abs, os.ModePerm)
 	if err != nil {
 		return err
 	}
 
-	return ChmodFile(abs, perm)
+	if !existed {
+		return ChmodFile(abs, perm)
+	}
+	return nil
 }
 
 func fileType(fileInfo os.FileInfo) string {

@@ -55,6 +55,45 @@ func TestRenameFile(t *testing.T) {
 	require.Error(t, RenameFile(model.RenameFileItem{Src: src, Dest: dst}), "expected error when destination already exists")
 }
 
+func TestMakeDir_PreExistingDir(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "existing")
+	require.NoError(t, os.Mkdir(existing, 0o755))
+
+	origInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	origMode := origInfo.Mode().Perm()
+
+	err = MakeDir(existing, model.Permission{Mode: 700})
+	require.NoError(t, err, "MakeDir on pre-existing dir should not fail")
+
+	afterInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	require.Equal(t, origMode, afterInfo.Mode().Perm(), "permissions of pre-existing dir should be unchanged")
+}
+
+func TestMakeDir_NewDir(t *testing.T) {
+	tmp := t.TempDir()
+	newDir := filepath.Join(tmp, "brand-new")
+
+	err := MakeDir(newDir, model.Permission{Mode: 755})
+	require.NoError(t, err)
+
+	info, err := os.Stat(newDir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+}
+
+func TestSetFileOwnership_EmptyOwnerGroup(t *testing.T) {
+	tmp := t.TempDir()
+	file := filepath.Join(tmp, "test.txt")
+	require.NoError(t, os.WriteFile(file, []byte("data"), 0o644))
+
+	err := SetFileOwnership(file, "", "")
+	require.NoError(t, err, "empty owner and group should be a no-op")
+}
+
 func TestSearchFileMetadata(t *testing.T) {
 	metadata := map[string]model.FileMetadata{
 		"/tmp/a/notes.txt": {Path: "/tmp/a/notes.txt"},
