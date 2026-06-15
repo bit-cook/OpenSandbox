@@ -898,8 +898,11 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
             # Inject volume bind mounts into Docker host config
             if runtime_volume_name:
+                runtime_mount_suffix = f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}:"
+                runtime_mount_end = f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}"
                 has_runtime_mount = any(
-                    f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}" in bind for bind in volume_binds
+                    runtime_mount_suffix in bind or bind.endswith(runtime_mount_end)
+                    for bind in volume_binds
                 )
                 if not has_runtime_mount:
                     volume_binds.append(
