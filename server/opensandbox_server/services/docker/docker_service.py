@@ -402,11 +402,18 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         except DockerException as exc:
             logger.warning("Failed to remove expired sandbox %s: %s", sandbox_id, exc)
 
+        managed_volumes_raw = labels.get(SANDBOX_MANAGED_VOLUMES_LABEL, "[]")
+        try:
+            managed_volumes: list[str] = json.loads(managed_volumes_raw)
+        except (TypeError, json.JSONDecodeError):
+            managed_volumes = []
+
         self._remove_expiration_tracking(sandbox_id)
         # Ensure sidecar is also cleaned up on expiration
         self._cleanup_egress_sidecar(sandbox_id)
         self._cleanup_windows_oem_volume(sandbox_id, labels)
         self._release_ossfs_mounts(mount_keys)
+        self._cleanup_managed_volumes(sandbox_id, managed_volumes)
         self._metadata_store.delete(sandbox_id)
 
     def _restore_existing_sandboxes(self) -> None:
@@ -814,21 +821,21 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             container_exposed_ports: Optional[list[str]] = exposed_ports
 
             if request.network_policy:
-                if credential_proxy_enabled:
-                    runtime_volume_name = f"opensandbox-runtime-{sandbox_id}"
-                    with self._docker_operation(
-                        "create credential proxy runtime volume", sandbox_id
-                    ):
-                        self.docker_client.volumes.create(
-                            name=runtime_volume_name,
-                            labels={SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
-                        )
-                    auto_created_volumes = list(auto_created_volumes or [])
-                    auto_created_volumes.append(runtime_volume_name)
-                    labels[SANDBOX_MANAGED_VOLUMES_LABEL] = json.dumps(
-                        auto_created_volumes,
-                        separators=(",", ":"),
+                runtime_volume_name = f"opensandbox-runtime-{sandbox_id}"
+                with self._docker_operation(
+                    "create egress runtime volume", sandbox_id
+                ):
+                    self.docker_client.volumes.create(
+                        name=runtime_volume_name,
+                        labels={SANDBOX_MANAGED_VOLUMES_LABEL: "server"},
                     )
+                auto_created_volumes = list(auto_created_volumes or [])
+                auto_created_volumes.append(runtime_volume_name)
+                labels[SANDBOX_MANAGED_VOLUMES_LABEL] = json.dumps(
+                    auto_created_volumes,
+                    separators=(",", ":"),
+                )
+                if credential_proxy_enabled:
                     environment = [
                         entry
                         for entry in environment
@@ -891,9 +898,16 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
             # Inject volume bind mounts into Docker host config
             if runtime_volume_name:
-                volume_binds.append(
-                    f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
+                runtime_mount_suffix = f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}:"
+                runtime_mount_end = f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}"
+                has_runtime_mount = any(
+                    runtime_mount_suffix in bind or bind.endswith(runtime_mount_end)
+                    for bind in volume_binds
                 )
+                if not has_runtime_mount:
+                    volume_binds.append(
+                        f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
+                    )
             if volume_binds:
                 host_config_kwargs["binds"] = volume_binds
             if requested_windows_profile:
