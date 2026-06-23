@@ -51,7 +51,7 @@ server:
     gatewayRouteMode: "header"
     image:
       repository: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress
-      tag: "v1.0.7"
+      tag: "v1.0.8"
     replicaCount: 2
     port: 28888
     dataplaneNamespace: "opensandbox"
@@ -98,5 +98,5 @@ configToml: |
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
   
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.1"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.2"
   mode = "dns+nft"
