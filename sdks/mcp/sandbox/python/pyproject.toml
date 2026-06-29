@@ -142,6 +142,7 @@ constraint-dependencies = [
     "python-multipart>=0.0.31",
     "cryptography>=48.0.1",
     "pydantic-settings>=2.14.2",
+    "pyjwt>=2.13.0",
 ]
 
 [tool.uv.sources]
