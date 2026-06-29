@@ -27,6 +27,7 @@ namespace OpenSandbox.Adapters;
 internal sealed class SandboxesAdapter : ISandboxes
 {
     private readonly HttpClientWrapper _client;
+    private readonly EndpointCache? _endpointCache;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -35,9 +36,10 @@ internal sealed class SandboxesAdapter : ISandboxes
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
-    public SandboxesAdapter(HttpClientWrapper client)
+    public SandboxesAdapter(HttpClientWrapper client, EndpointCache? endpointCache = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        _endpointCache = endpointCache;
     }
 
     public async Task<CreateSandboxResponse> CreateSandboxAsync(
@@ -211,6 +213,26 @@ internal sealed class SandboxesAdapter : ISandboxes
         bool useServerProxy = false,
         CancellationToken cancellationToken = default)
     {
+        if (_endpointCache != null)
+        {
+            var key = new EndpointCacheKey(sandboxId, port, useServerProxy);
+            // Shared fetch uses CancellationToken.None so one caller's cancellation
+            // doesn't kill the request for all waiters. Per-caller cancellation is
+            // handled in GetOrFetchAsync via Task.WhenAny.
+            return await _endpointCache.GetOrFetchAsync(key,
+                () => FetchSandboxEndpointAsync(sandboxId, port, useServerProxy, CancellationToken.None),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return await FetchSandboxEndpointAsync(sandboxId, port, useServerProxy, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Endpoint> FetchSandboxEndpointAsync(
+        string sandboxId,
+        int port,
+        bool useServerProxy,
+        CancellationToken cancellationToken)
+    {
         var queryParams = new Dictionary<string, string?>
         {
             ["use_server_proxy"] = useServerProxy ? "true" : "false"
@@ -222,6 +244,11 @@ internal sealed class SandboxesAdapter : ISandboxes
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return ParseEndpointResponse(response);
+    }
+
+    public void InvalidateEndpointCache(string sandboxId)
+    {
+        _endpointCache?.Invalidate(sandboxId);
     }
 
     public async Task<Endpoint> GetSignedSandboxEndpointAsync(
