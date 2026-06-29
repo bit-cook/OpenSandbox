@@ -51,6 +51,7 @@ dependencies = [
 [project.optional-dependencies]
 pool-redis = [
     "redis>=5.0,<6.0",
+    "pyjwt>=2.13.0",
 ]
 
 [project.urls]
