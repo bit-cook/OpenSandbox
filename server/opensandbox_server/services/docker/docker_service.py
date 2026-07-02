@@ -215,7 +215,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._pending_cleanup_timers: Dict[str, Timer] = {}
         self._ossfs_mount_lock = Lock()
         self._ossfs_mount_ref_counts: Dict[str, int] = {}
-        self._provision_semaphore = asyncio.Semaphore(10)
         self._restore_existing_sandboxes()
 
         # Initialize secure runtime resolver
@@ -658,35 +657,34 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
         pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
-        async with self._provision_semaphore:
-            loop = asyncio.get_running_loop()
-            future: asyncio.Future[CreateSandboxResponse] = loop.create_future()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[CreateSandboxResponse] = loop.create_future()
 
-            def _run() -> None:
-                try:
-                    result = self._provision_sandbox(
-                        sandbox_id, request, created_at, expires_at,
-                        pvc_inspect_cache, auto_created_volumes,
-                        sandbox_env=sandbox_env, egress_env=egress_env,
-                    )
-                    loop.call_soon_threadsafe(future.set_result, result)
-                except BaseException as exc:
-                    try:
-                        loop.call_soon_threadsafe(future.set_exception, exc)
-                    except RuntimeError:
-                        pass
-
-            Thread(target=_run, daemon=True).start()
+        def _run() -> None:
             try:
-                return await future
-            except ValueError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": SandboxErrorCodes.INVALID_PARAMETER,
-                        "message": str(e),
-                    },
-                ) from e
+                result = self._provision_sandbox(
+                    sandbox_id, request, created_at, expires_at,
+                    pvc_inspect_cache, auto_created_volumes,
+                    sandbox_env=sandbox_env, egress_env=egress_env,
+                )
+                loop.call_soon_threadsafe(future.set_result, result)
+            except BaseException as exc:
+                try:
+                    loop.call_soon_threadsafe(future.set_exception, exc)
+                except RuntimeError:
+                    pass
+
+        Thread(target=_run, daemon=True).start()
+        try:
+            return await future
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": str(e),
+                },
+            ) from e
 
     def _async_provision_worker(
         self,
