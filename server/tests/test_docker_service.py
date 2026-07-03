@@ -1199,6 +1199,53 @@ def test_egress_sidecar_host_config_sysctls_only_when_egress_disable_ipv6(mock_d
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
+def test_egress_sidecar_retries_without_ipv6_sysctls_when_daemon_rejects_them(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+
+    def host_cfg_side_effect(**kwargs):
+        return kwargs
+
+    mock_client.api.create_host_config.side_effect = host_cfg_side_effect
+
+    def create_container_side_effect(**kwargs):
+        host_config = kwargs["host_config"]
+        if "sysctls" in host_config:
+            raise DockerException(
+                "open /proc/sys/net/ipv6/conf/all/disable_ipv6: no such file or directory"
+            )
+        return {"Id": "sidecar-id"}
+
+    mock_client.api.create_container.side_effect = create_container_side_effect
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.egress = EgressConfig(image="egress:latest", disable_ipv6=True)
+    service = DockerSandboxService(config=cfg)
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_docker_operation") as mock_op,
+    ):
+        mock_op.return_value.__enter__.return_value = None
+        mock_op.return_value.__exit__.return_value = None
+        service._start_egress_sidecar(
+            "sandbox-id",
+            NetworkPolicy(defaultAction="deny", egress=[]),
+            egress_token="egress-token",
+            host_execd_port=44772,
+            host_http_port=8080,
+        )
+
+    first_create = mock_client.api.create_container.call_args_list[0].kwargs
+    second_create = mock_client.api.create_container.call_args_list[1].kwargs
+    assert first_create["host_config"]["sysctls"]["net.ipv6.conf.all.disable_ipv6"] == 1
+    assert "sysctls" not in second_create["host_config"]
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
 def test_egress_sidecar_normalizes_windows_port_bindings(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
