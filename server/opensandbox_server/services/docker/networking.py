@@ -67,14 +67,15 @@ def _running_inside_docker_container() -> bool:
     return os.path.exists("/.dockerenv")
 
 
-def _docker_ipv6_disable_sysctls_supported() -> bool:
-    """Return True when the host exposes the IPv6 procfs knobs used by Docker sysctls."""
-    return all(
-        os.path.exists(path)
-        for path in (
-            "/proc/sys/net/ipv6/conf/all/disable_ipv6",
-            "/proc/sys/net/ipv6/conf/default/disable_ipv6",
-            "/proc/sys/net/ipv6/conf/lo/disable_ipv6",
+def _docker_error_indicates_unsupported_ipv6_sysctls(exc: DockerException) -> bool:
+    """Return True when Docker rejects IPv6-disable sysctls for the target daemon."""
+    message = str(exc).lower()
+    return (
+        "disable_ipv6" in message
+        and (
+            "/proc/sys/net/ipv6/" in message
+            or "no such file or directory" in message
+            or "sysctl" in message
         )
     )
 
@@ -427,46 +428,70 @@ class DockerNetworkingMixin:
         if extra_port_bindings:
             sidecar_port_bindings.update(extra_port_bindings)
 
-        sidecar_host_config_kwargs: dict[str, Any] = {
+        base_sidecar_host_config_kwargs: dict[str, Any] = {
             "network_mode": BRIDGE_NETWORK_MODE,
             "cap_add": ["NET_ADMIN"],
             "port_bindings": normalize_port_bindings(sidecar_port_bindings),
         }
         if runtime_volume_name:
-            sidecar_host_config_kwargs["binds"] = [
+            base_sidecar_host_config_kwargs["binds"] = [
                 f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
             ]
-        if self.app_config.egress.disable_ipv6:
-            if _docker_ipv6_disable_sysctls_supported():
+
+        def build_sidecar_host_config(*, include_ipv6_sysctls: bool) -> Any:
+            sidecar_host_config_kwargs = dict(base_sidecar_host_config_kwargs)
+            if include_ipv6_sysctls:
                 # Optional: disable IPv6 in the shared namespace when egress.disable_ipv6 is set.
                 sidecar_host_config_kwargs["sysctls"] = {
                     "net.ipv6.conf.all.disable_ipv6": 1,
                     "net.ipv6.conf.default.disable_ipv6": 1,
                     "net.ipv6.conf.lo.disable_ipv6": 1,
                 }
-            else:
-                logger.warning(
-                    "sandbox=%s | skip egress IPv6 sysctls because host procfs entries are unavailable",
-                    sandbox_id,
-                )
+            return self.docker_client.api.create_host_config(**sidecar_host_config_kwargs)
 
-        sidecar_host_config = self.docker_client.api.create_host_config(
-            **sidecar_host_config_kwargs
+        include_ipv6_sysctls = self.app_config.egress.disable_ipv6
+        sidecar_host_config = build_sidecar_host_config(
+            include_ipv6_sysctls=include_ipv6_sysctls
         )
 
         sidecar_container = None
         sidecar_container_id: Optional[str] = None
         try:
-            with self._docker_operation("create egress sidecar", sandbox_id):
-                sidecar_resp = self.docker_client.api.create_container(
-                    image=egress_image,
-                    name=sidecar_name,
-                    host_config=sidecar_host_config,
-                    labels=sidecar_labels,
-                    environment=sidecar_env,
-                    # Expose the ports that have host bindings so Docker publishes them in bridge mode.
-                    ports=[normalize_container_port_spec(p) for p in sidecar_port_bindings.keys()],
+            try:
+                with self._docker_operation("create egress sidecar", sandbox_id):
+                    sidecar_resp = self.docker_client.api.create_container(
+                        image=egress_image,
+                        name=sidecar_name,
+                        host_config=sidecar_host_config,
+                        labels=sidecar_labels,
+                        environment=sidecar_env,
+                        # Expose the ports that have host bindings so Docker publishes them in bridge mode.
+                        ports=[normalize_container_port_spec(p) for p in sidecar_port_bindings.keys()],
+                    )
+            except DockerException as exc:
+                if not (
+                    include_ipv6_sysctls
+                    and _docker_error_indicates_unsupported_ipv6_sysctls(exc)
+                ):
+                    raise
+                logger.warning(
+                    "sandbox=%s | retry egress sidecar without IPv6 sysctls after daemon rejection: %s",
+                    sandbox_id,
+                    exc,
                 )
+                sidecar_host_config = build_sidecar_host_config(
+                    include_ipv6_sysctls=False
+                )
+                with self._docker_operation("create egress sidecar", sandbox_id):
+                    sidecar_resp = self.docker_client.api.create_container(
+                        image=egress_image,
+                        name=sidecar_name,
+                        host_config=sidecar_host_config,
+                        labels=sidecar_labels,
+                        environment=sidecar_env,
+                        # Expose the ports that have host bindings so Docker publishes them in bridge mode.
+                        ports=[normalize_container_port_spec(p) for p in sidecar_port_bindings.keys()],
+                    )
             sidecar_container_id = sidecar_resp.get("Id")
             if not sidecar_container_id:
                 raise HTTPException(

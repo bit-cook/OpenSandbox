@@ -1183,7 +1183,6 @@ def test_egress_sidecar_host_config_sysctls_only_when_egress_disable_ipv6(mock_d
     with (
         patch.object(service2, "_ensure_image_available"),
         patch.object(service2, "_docker_operation") as mock_op2,
-        patch("opensandbox_server.services.docker.networking.os.path.exists", side_effect=lambda path: path.startswith("/proc/sys/net/ipv6/") or path == "/.dockerenv"),
     ):
         mock_op2.return_value.__enter__.return_value = None
         mock_op2.return_value.__exit__.return_value = None
@@ -1200,7 +1199,7 @@ def test_egress_sidecar_host_config_sysctls_only_when_egress_disable_ipv6(mock_d
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
-def test_egress_sidecar_skips_ipv6_sysctls_when_host_procfs_entries_are_missing(mock_docker):
+def test_egress_sidecar_retries_without_ipv6_sysctls_when_daemon_rejects_them(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
 
@@ -1208,7 +1207,16 @@ def test_egress_sidecar_skips_ipv6_sysctls_when_host_procfs_entries_are_missing(
         return kwargs
 
     mock_client.api.create_host_config.side_effect = host_cfg_side_effect
-    mock_client.api.create_container.return_value = {"Id": "sidecar-id"}
+
+    def create_container_side_effect(**kwargs):
+        host_config = kwargs["host_config"]
+        if "sysctls" in host_config:
+            raise DockerException(
+                "open /proc/sys/net/ipv6/conf/all/disable_ipv6: no such file or directory"
+            )
+        return {"Id": "sidecar-id"}
+
+    mock_client.api.create_container.side_effect = create_container_side_effect
     mock_client.containers.get.return_value = MagicMock()
     mock_docker.from_env.return_value = mock_client
 
@@ -1220,7 +1228,6 @@ def test_egress_sidecar_skips_ipv6_sysctls_when_host_procfs_entries_are_missing(
     with (
         patch.object(service, "_ensure_image_available"),
         patch.object(service, "_docker_operation") as mock_op,
-        patch("opensandbox_server.services.docker.networking.os.path.exists", side_effect=lambda path: path == "/.dockerenv"),
     ):
         mock_op.return_value.__enter__.return_value = None
         mock_op.return_value.__exit__.return_value = None
@@ -1232,8 +1239,10 @@ def test_egress_sidecar_skips_ipv6_sysctls_when_host_procfs_entries_are_missing(
             host_http_port=8080,
         )
 
-    hc = mock_client.api.create_host_config.call_args.kwargs
-    assert "sysctls" not in hc
+    first_create = mock_client.api.create_container.call_args_list[0].kwargs
+    second_create = mock_client.api.create_container.call_args_list[1].kwargs
+    assert first_create["host_config"]["sysctls"]["net.ipv6.conf.all.disable_ipv6"] == 1
+    assert "sysctls" not in second_create["host_config"]
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
