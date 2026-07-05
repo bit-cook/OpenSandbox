@@ -35,10 +35,10 @@ DEFAULT_TENANTS_CONFIG_PATH = Path.home() / ".opensandbox" / "tenants.toml"
 
 def resolve_tenants_path(path: Optional[str | Path] = None) -> Path:
     if path:
-        return Path(path)
+        return Path(path).expanduser()
     env = os.environ.get(TENANTS_CONFIG_ENV_VAR)
     if env:
-        return Path(env)
+        return Path(env).expanduser()
     return DEFAULT_TENANTS_CONFIG_PATH
 
 

@@ -284,9 +284,7 @@ class SQLiteSnapshotRepository:
             if row["name"] == "namespace" and row["notnull"]:
                 conn.executescript(
                     """
-                    CREATE TABLE snapshots_tmp AS SELECT * FROM snapshots;
-                    DROP TABLE snapshots;
-                    CREATE TABLE snapshots (
+                    CREATE TABLE snapshots_new (
                         id TEXT PRIMARY KEY,
                         source_sandbox_id TEXT NOT NULL,
                         namespace TEXT DEFAULT NULL,
@@ -300,8 +298,17 @@ class SQLiteSnapshotRepository:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    INSERT INTO snapshots SELECT * FROM snapshots_tmp;
-                    DROP TABLE snapshots_tmp;
+                    INSERT INTO snapshots_new (
+                        id, source_sandbox_id, namespace, name, description,
+                        restore_config, state, reason, message,
+                        last_transition_at, created_at, updated_at
+                    ) SELECT
+                        id, source_sandbox_id, namespace, name, description,
+                        restore_config, state, reason, message,
+                        last_transition_at, created_at, updated_at
+                    FROM snapshots;
+                    DROP TABLE snapshots;
+                    ALTER TABLE snapshots_new RENAME TO snapshots;
                     CREATE INDEX IF NOT EXISTS idx_snapshots_source_sandbox_id
                         ON snapshots(source_sandbox_id);
                     CREATE INDEX IF NOT EXISTS idx_snapshots_state
