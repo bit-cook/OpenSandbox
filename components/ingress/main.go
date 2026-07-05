@@ -31,6 +31,7 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
+	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/alibaba/opensandbox/internal/version"
 )
@@ -46,6 +47,19 @@ func main() {
 
 	ctx := signals.NewContext()
 	ctx = withLogger(ctx, flag.LogLevel)
+
+	otelShutdown, err := telemetry.Init(ctx)
+	if err != nil {
+		log.Printf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
+		otelShutdown = nil
+	}
+	if otelShutdown != nil {
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			_ = otelShutdown(shutdownCtx)
+		}()
+	}
 
 	// Create sandbox provider factory
 	providerFactory := sandbox.NewProviderFactory(

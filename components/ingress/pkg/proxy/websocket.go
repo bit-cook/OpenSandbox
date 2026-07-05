@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/gorilla/websocket"
 )
@@ -198,6 +199,7 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer connPub.Close()
+	telemetry.RecordProxyWebSocket()
 
 	errClient := make(chan error, 1)
 	errBackend := make(chan error, 1)
