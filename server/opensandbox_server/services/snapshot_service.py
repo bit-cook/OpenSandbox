@@ -249,7 +249,7 @@ class PersistedSnapshotService(SnapshotService):
         tenant = get_current_tenant()
         if tenant is None:
             return
-        if record.namespace is not None and record.namespace != tenant.namespace:
+        if record.namespace is None or record.namespace != tenant.namespace:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={

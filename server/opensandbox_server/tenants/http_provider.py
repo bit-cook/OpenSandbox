@@ -196,9 +196,6 @@ class HTTPTenantProvider:
             with self._lock:
                 self._inflight.pop(api_key, None)
             event.set()
-            with self._lock:
-                self._inflight_result.pop(api_key, None)
-                self._inflight_error.pop(api_key, None)
 
     def _do_fetch(self, api_key: str, now: float) -> Optional[TenantEntry]:
         """GET the endpoint for a single api_key. Returns TenantEntry or raises."""
