@@ -240,16 +240,16 @@ class PersistedSnapshotService(SnapshotService):
         return PaginationRequest()
 
     @staticmethod
-    def _get_tenant_namespace() -> str:
+    def _get_tenant_namespace() -> str | None:
         tenant = get_current_tenant()
-        return tenant.namespace if tenant else "default"
+        return tenant.namespace if tenant else None
 
     @staticmethod
     def _verify_tenant_access(record: SnapshotRecord) -> None:
         tenant = get_current_tenant()
         if tenant is None:
             return
-        if record.namespace != tenant.namespace:
+        if record.namespace is not None and record.namespace != tenant.namespace:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={

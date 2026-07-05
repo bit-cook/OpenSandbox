@@ -87,10 +87,10 @@ class KubernetesSnapshotRuntime:
         snapshot_id: str,
         sandbox_id: str,
         *,
-        namespace: str = "default",
+        namespace: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         snapshot_name = build_public_snapshot_name(snapshot_id)
-        ns = namespace if namespace != "default" else self._namespace
+        ns = namespace if namespace is not None else self._namespace
         self._snapshot_namespaces[snapshot_id] = ns
         body = self._build_snapshot_body(snapshot_id, sandbox_id, snapshot_name, namespace=ns)
         should_validate_existing_source = False
@@ -140,9 +140,9 @@ class KubernetesSnapshotRuntime:
         ns = self._snapshot_namespaces.get(snapshot_id)
         return self.inspect_snapshot(snapshot_id, namespace=ns)
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str = "default") -> None:
+    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
         snapshot_name = build_public_snapshot_name(snapshot_id)
-        fallback = namespace if namespace != "default" else self._namespace
+        fallback = namespace if namespace is not None else self._namespace
         ns = self._snapshot_namespaces.pop(snapshot_id, fallback)
         try:
             self._k8s_client.delete_custom_object(
@@ -202,7 +202,7 @@ class KubernetesSnapshotRuntime:
         return self._k8s_client.get_custom_object(
             group=_GROUP,
             version=_VERSION,
-            namespace=namespace or self._namespace,
+            namespace=namespace if namespace is not None else self._namespace,
             plural=_PLURAL,
             name=snapshot_name,
         )

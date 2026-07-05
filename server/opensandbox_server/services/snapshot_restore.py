@@ -62,7 +62,7 @@ def resolve_sandbox_image_from_request(request: CreateSandboxRequest) -> CreateS
         )
 
     tenant = get_current_tenant()
-    if tenant is not None and snapshot.namespace != tenant.namespace:
+    if tenant is not None and snapshot.namespace is not None and snapshot.namespace != tenant.namespace:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={

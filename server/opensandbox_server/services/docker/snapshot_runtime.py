@@ -57,14 +57,14 @@ class DockerSnapshotRuntime:
         snapshot_id: str,
         sandbox_id: str,
         *,
-        namespace: str = "default",
+        namespace: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         return self._create_snapshot(snapshot_id, sandbox_id)
 
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
         return None
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str = "default") -> None:
+    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
         image_ref = image or build_snapshot_image_ref(snapshot_id)
         try:
             self._docker_client.images.remove(image=image_ref)

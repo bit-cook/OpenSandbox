@@ -89,14 +89,14 @@ class StubSnapshotRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 
-    def create_snapshot(self, snapshot_id: str, sandbox_id: str, *, namespace: str = "default"):
+    def create_snapshot(self, snapshot_id: str, sandbox_id: str, *, namespace: str | None = None):
         self.calls.append((snapshot_id, sandbox_id))
         return None
 
     def get_snapshot_status(self, snapshot_id: str):
         return None
 
-    def delete_snapshot(self, snapshot_id: str, image: str | None = None, *, namespace: str = "default") -> None:
+    def delete_snapshot(self, snapshot_id: str, image: str | None = None, *, namespace: str | None = None) -> None:
         self.delete_calls.append((snapshot_id, image))
 
     def inspect_snapshot(self, snapshot_id: str, image: str | None = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:

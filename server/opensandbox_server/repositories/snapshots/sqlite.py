@@ -241,7 +241,7 @@ class SQLiteSnapshotRepository:
                 CREATE TABLE IF NOT EXISTS snapshots (
                     id TEXT PRIMARY KEY,
                     source_sandbox_id TEXT NOT NULL,
-                    namespace TEXT NOT NULL DEFAULT 'default',
+                    namespace TEXT DEFAULT NULL,
                     name TEXT,
                     description TEXT,
                     restore_config TEXT NOT NULL,
@@ -272,7 +272,7 @@ class SQLiteSnapshotRepository:
         columns = {row["name"] for row in rows}
         if "namespace" not in columns:
             conn.execute(
-                "ALTER TABLE snapshots ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'"
+                "ALTER TABLE snapshots ADD COLUMN namespace TEXT DEFAULT NULL"
             )
 
     def _connect(self) -> sqlite3.Connection:
