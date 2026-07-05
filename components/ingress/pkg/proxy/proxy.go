@@ -52,6 +52,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 	proxyType := "http"
+	if p.isWebSocketRequest(r) {
+		proxyType = "websocket"
+	}
 
 	defer func() {
 		if rcv := recover(); rcv != nil {
@@ -100,10 +103,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del(SandboxIngress)
 	r.Header.Del(signature.OpenSandboxSecureAccessCanonical)
 
-	if p.isWebSocketRequest(r) {
-		proxyType = "websocket"
-	}
-
 	Logger.With(
 		slogger.Field{Key: "target", Value: targetHost},
 		slogger.Field{Key: "client", Value: p.getClientIP(r)},
@@ -127,7 +126,6 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request) {
 				r.URL.Scheme = "ws"
 			}
 		}
-		telemetry.RecordProxyWebSocket()
 		NewWebSocketProxy(r.URL).ServeHTTP(w, r)
 	} else {
 		if r.URL.Scheme == "" {
@@ -202,7 +200,12 @@ func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {
 
 func (w *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
-		return hj.Hijack()
+		conn, buf, err := hj.Hijack()
+		if err == nil && !w.written {
+			w.statusCode = http.StatusSwitchingProtocols
+			w.written = true
+		}
+		return conn, buf, err
 	}
 	return nil, nil, fmt.Errorf("upstream ResponseWriter does not implement http.Hijacker")
 }
