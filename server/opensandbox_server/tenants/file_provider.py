@@ -64,6 +64,8 @@ def _parse_tenants_file(path: Path) -> List[TenantEntry]:
             raise ValueError(f"Tenant '{name}' has no api_keys configured.")
 
         for key in api_keys:
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError(f"Tenant '{name}' has a blank or non-string api_key.")
             if key in seen_keys:
                 raise ValueError(
                     f"Duplicate api_key across tenants: '{name}' and '{seen_keys[key]}'."

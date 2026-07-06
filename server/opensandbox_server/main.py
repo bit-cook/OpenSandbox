@@ -164,6 +164,7 @@ app = FastAPI(
 
 # Attach global config for runtime access
 app.state.config = app_config
+app.state.tenant_provider = tenant_provider
 
 # Middleware run in reverse order of addition: last added = first to run (outermost).
 # Add auth and CORS first so they run after RequestIdMiddleware.
