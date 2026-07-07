@@ -37,7 +37,47 @@ export interface IsolationSession {
   delete(): Promise<void>;
 }
 
+export interface RunOnceOpts {
+  workspaceMode?: "rw" | "overlay" | "ro";
+  runOpts?: IsolatedRunOpts;
+  handlers?: ExecutionHandlers;
+  profile?: "strict" | "balanced";
+  shareNet?: boolean;
+  signal?: AbortSignal;
+}
+
 export interface IsolationService {
   create(request: CreateIsolatedSessionRequest): Promise<IsolationSession>;
   capabilities(): Promise<IsolatedCapabilities>;
+}
+
+export async function runOnce(
+  service: IsolationService,
+  code: string,
+  workspace: string,
+  opts?: RunOnceOpts,
+): Promise<CommandExecution> {
+  const session = await service.create({
+    workspace: { path: workspace, mode: opts?.workspaceMode },
+    profile: opts?.profile,
+    share_net: opts?.shareNet,
+  });
+  try {
+    return await session.run(code, opts?.runOpts, opts?.handlers, opts?.signal);
+  } finally {
+    try { await session.delete(); } catch { /* best-effort cleanup */ }
+  }
+}
+
+export async function withSession<T>(
+  service: IsolationService,
+  request: CreateIsolatedSessionRequest,
+  fn: (session: IsolationSession) => Promise<T>,
+): Promise<T> {
+  const session = await service.create(request);
+  try {
+    return await fn(session);
+  } finally {
+    try { await session.delete(); } catch { /* best-effort cleanup */ }
+  }
 }

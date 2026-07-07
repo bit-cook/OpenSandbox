@@ -567,3 +567,61 @@ class TestIsolatedSessionE2E:
         finally:
             await session.delete()
             await self.sandbox.commands.run(f"rm -rf {prefix}")
+
+    # ── run_once / isolation_session standalone function tests ────────
+
+    async def test_run_once(self):
+        from opensandbox import run_once
+
+        result = await run_once(
+            self.sandbox.isolation,
+            "echo run-once-works",
+            workspace="/tmp",
+            workspace_mode="rw",
+        )
+        assert "run-once-works" in result.text
+
+    async def test_run_once_with_envs(self):
+        from opensandbox import run_once
+
+        result = await run_once(
+            self.sandbox.isolation,
+            "echo $RUN_ONCE_VAR",
+            workspace="/tmp",
+            workspace_mode="rw",
+            opts=IsolatedRunOpts(envs={"RUN_ONCE_VAR": "e2e-value"}),
+        )
+        assert "e2e-value" in result.text
+
+    async def test_run_once_session_cleaned_up(self):
+        from opensandbox import run_once
+
+        result = await run_once(
+            self.sandbox.isolation,
+            "echo $$",
+            workspace="/tmp",
+            workspace_mode="rw",
+        )
+        assert result.text.strip().isdigit()
+
+    async def test_session_context_manager(self):
+        from opensandbox import isolation_session
+
+        request = CreateIsolatedSessionRequest(
+            workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
+        )
+        async with isolation_session(self.sandbox.isolation, request) as session:
+            r1 = await session.run("export CTX_VAR=hello123")
+            r2 = await session.run("echo $CTX_VAR")
+            assert "hello123" in r2.text
+
+    async def test_session_context_manager_multi_run(self):
+        from opensandbox import isolation_session
+
+        request = CreateIsolatedSessionRequest(
+            workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
+        )
+        async with isolation_session(self.sandbox.isolation, request) as session:
+            await session.run("echo step1 > /tmp/ctx_test.txt")
+            result = await session.run("cat /tmp/ctx_test.txt")
+            assert "step1" in result.text

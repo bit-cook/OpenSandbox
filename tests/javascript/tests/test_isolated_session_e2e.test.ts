@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { Sandbox } from "@alibaba-group/opensandbox";
+import { Sandbox, runOnce, withSession } from "@alibaba-group/opensandbox";
 import type { OutputMessage } from "@alibaba-group/opensandbox";
 import { createConnectionConfig, getSandboxImage } from "./base_e2e.js";
 
@@ -673,5 +673,48 @@ describe("IsolatedSession E2E", () => {
     } finally {
       await session.delete();
     }
+  });
+
+  // ── runOnce / withSession convenience API tests ──────────────────
+
+  it("test_runOnce", async () => {
+    const result = await runOnce(sandbox.isolation, "echo runonce-e2e", "/tmp", {
+      workspaceMode: "rw",
+    });
+    expect(result.logs.stdout.some(m => m.text.includes("runonce-e2e"))).toBe(true);
+  });
+
+  it("test_runOnce_with_envs", async () => {
+    const result = await runOnce(sandbox.isolation, "echo $E2E_RUN_ONCE", "/tmp", {
+      workspaceMode: "rw",
+      runOpts: { envs: { E2E_RUN_ONCE: "js-value" } },
+    });
+    expect(result.logs.stdout.some(m => m.text.includes("js-value"))).toBe(true);
+  });
+
+  it("test_withSession", async () => {
+    const output = await withSession(
+      sandbox.isolation,
+      { workspace: { path: "/tmp", mode: "rw" } },
+      async (session) => {
+        await session.run("export WS_VAR=with-session-js");
+        const r = await session.run("echo $WS_VAR");
+        return r.logs.stdout.map(m => m.text).join("");
+      },
+    );
+    expect(output).toContain("with-session-js");
+  });
+
+  it("test_withSession_multi_run", async () => {
+    const output = await withSession(
+      sandbox.isolation,
+      { workspace: { path: "/tmp", mode: "rw" } },
+      async (session) => {
+        await session.run("echo step1 > /tmp/ws_test.txt");
+        const r = await session.run("cat /tmp/ws_test.txt");
+        return r.logs.stdout.map(m => m.text).join("");
+      },
+    );
+    expect(output).toContain("step1");
   });
 });
