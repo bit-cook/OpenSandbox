@@ -94,12 +94,14 @@ class InMemoryPoolStateStore : PoolStateStore {
         poolName: String,
         sandboxId: String,
     ) {
-        rejectIfDestroyed(poolName)
-        val state = pools.computeIfAbsent(poolName) { PoolIdleState() }
-        val expiresAt = Instant.now().plus(resolveIdleTtl(poolName))
-        val entry = IdleEntry(sandboxId, expiresAt)
-        if (state.map.putIfAbsent(sandboxId, entry) == null) {
-            state.queue.add(sandboxId)
+        synchronized(this) {
+            rejectIfDestroyed(poolName)
+            val state = pools.computeIfAbsent(poolName) { PoolIdleState() }
+            val expiresAt = Instant.now().plus(resolveIdleTtl(poolName))
+            val entry = IdleEntry(sandboxId, expiresAt)
+            if (state.map.putIfAbsent(sandboxId, entry) == null) {
+                state.queue.add(sandboxId)
+            }
         }
     }
 
@@ -206,31 +208,36 @@ class InMemoryPoolStateStore : PoolStateStore {
         idleTtlByPool[poolName] = validateIdleTtl(idleTtl)
     }
 
-    override fun getDestroyState(poolName: String): PoolDestroyState {
-        val entry = destroyStateByPool[poolName] ?: return PoolDestroyState.ACTIVE
-        val expiresAt = entry.expiresAt
-        if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
-            destroyStateByPool.remove(poolName, entry)
-            return PoolDestroyState.ACTIVE
+    override fun getDestroyState(poolName: String): PoolDestroyState =
+        synchronized(this) {
+            val entry = destroyStateByPool[poolName] ?: return PoolDestroyState.ACTIVE
+            val expiresAt = entry.expiresAt
+            if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
+                destroyStateByPool.remove(poolName, entry)
+                return PoolDestroyState.ACTIVE
+            }
+            entry.state
         }
-        return entry.state
-    }
 
     override fun beginDestroy(
         poolName: String,
         ownerId: String,
     ) {
-        require(ownerId.isNotBlank()) { "ownerId must not be blank" }
-        val existing = getDestroyState(poolName)
-        if (existing == PoolDestroyState.DESTROYED) {
-            throw PoolDestroyedException("Pool namespace is already DESTROYED: poolName=$poolName")
+        synchronized(this) {
+            require(ownerId.isNotBlank()) { "ownerId must not be blank" }
+            val existing = getDestroyState(poolName)
+            if (existing == PoolDestroyState.DESTROYED) {
+                throw PoolDestroyedException("Pool namespace is already DESTROYED: poolName=$poolName")
+            }
+            destroyStateByPool[poolName] = DestroyStateEntry(PoolDestroyState.DESTROYING, null, ownerId)
         }
-        destroyStateByPool[poolName] = DestroyStateEntry(PoolDestroyState.DESTROYING, null, ownerId)
     }
 
     override fun clearPoolState(poolName: String) {
-        pools.remove(poolName)
-        idleTtlByPool.remove(poolName)
+        synchronized(this) {
+            pools.remove(poolName)
+            idleTtlByPool.remove(poolName)
+        }
     }
 
     override fun markDestroyed(
@@ -238,9 +245,11 @@ class InMemoryPoolStateStore : PoolStateStore {
         ownerId: String,
         tombstoneTtl: Duration?,
     ) {
-        require(ownerId.isNotBlank()) { "ownerId must not be blank" }
-        val expiresAt = tombstoneTtl?.let { Instant.now().plus(it) }
-        destroyStateByPool[poolName] = DestroyStateEntry(PoolDestroyState.DESTROYED, expiresAt, ownerId)
+        synchronized(this) {
+            require(ownerId.isNotBlank()) { "ownerId must not be blank" }
+            val expiresAt = tombstoneTtl?.let { Instant.now().plus(it) }
+            destroyStateByPool[poolName] = DestroyStateEntry(PoolDestroyState.DESTROYED, expiresAt, ownerId)
+        }
     }
 
     private class PoolIdleState {

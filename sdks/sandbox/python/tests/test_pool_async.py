@@ -124,6 +124,42 @@ async def test_async_acquire_does_not_direct_create_when_pool_namespace_is_destr
 
 
 @pytest.mark.asyncio
+async def test_async_acquire_idle_destroy_race_raises_pool_destroyed() -> None:
+    store = InMemoryAsyncPoolStateStore()
+    await store.put_idle("pool", "id-1")
+    connected: list[FakeAsyncSandbox] = []
+
+    class FencingAsyncSandbox(FakeAsyncSandbox):
+        @classmethod
+        async def connect(
+            cls, sandbox_id: str, *args: Any, **kwargs: Any
+        ) -> FakeAsyncSandbox:
+            sandbox = cls(sandbox_id)
+            connected.append(sandbox)
+            await store.begin_destroy("pool", "destroyer")
+            return sandbox
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),
+        sandbox_factory=FencingAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        with pytest.raises(PoolDestroyedException):
+            await pool.acquire(policy=AcquirePolicy.DIRECT_CREATE)
+        assert connected[0].killed
+        assert connected[0].closed
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
 async def test_async_acquire_direct_create_forwards_pool_creation_platform() -> None:
     captured_kwargs: dict[str, Any] = {}
 

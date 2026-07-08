@@ -238,6 +238,7 @@ class SandboxPool internal constructor(
                                 config.acquireHealthCheck?.let { healthCheck(it) } ?: this
                             }.connect()
                     sandboxTimeout?.let { sandbox.renew(it) }
+                    ensurePoolNamespaceActiveOrDispose(sandbox)
                     // Candidate is connected and (optionally) renewed. Now safe to clean up the
                     // discarded-alive sandboxes; offload to the warmup executor so the caller
                     // does not wait for N kill RPCs.
@@ -249,6 +250,8 @@ class SandboxPool internal constructor(
                         policy,
                     )
                     return sandbox
+                } catch (e: PoolDestroyedException) {
+                    throw e
                 } catch (e: Exception) {
                     idleConnectFailure = e
                     logger.warn(
@@ -669,7 +672,7 @@ class SandboxPool internal constructor(
     private fun ensurePoolNamespaceActiveOrDispose(sandbox: Sandbox) {
         try {
             ensurePoolNamespaceActive()
-        } catch (e: PoolDestroyedException) {
+        } catch (e: Exception) {
             try {
                 sandbox.kill()
             } finally {

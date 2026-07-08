@@ -142,6 +142,39 @@ def test_acquire_does_not_direct_create_when_pool_namespace_is_destroying() -> N
         pool.shutdown(False)
 
 
+def test_acquire_idle_destroy_race_raises_pool_destroyed() -> None:
+    store = InMemoryPoolStateStore()
+    store.put_idle("pool", "id-1")
+    connected: list[FakeSandbox] = []
+
+    class FencingSandbox(FakeSandbox):
+        @classmethod
+        def connect(cls, sandbox_id: str, *args: Any, **kwargs: Any) -> FakeSandbox:
+            sandbox = cls(sandbox_id)
+            connected.append(sandbox)
+            store.begin_destroy("pool", "destroyer")
+            return sandbox
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=FencingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        with pytest.raises(PoolDestroyedException):
+            pool.acquire(policy=AcquirePolicy.DIRECT_CREATE)
+        assert connected[0].killed
+        assert connected[0].closed
+    finally:
+        pool.shutdown(False)
+
+
 def test_acquire_direct_create_forwards_pool_creation_platform() -> None:
     captured_kwargs: dict[str, Any] = {}
 

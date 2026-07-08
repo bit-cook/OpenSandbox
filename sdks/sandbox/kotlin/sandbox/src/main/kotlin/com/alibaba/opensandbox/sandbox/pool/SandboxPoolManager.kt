@@ -19,6 +19,7 @@ package com.alibaba.opensandbox.sandbox.pool
 import com.alibaba.opensandbox.sandbox.SandboxManager
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyIncompleteException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyedException
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyOptions
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyResult
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyState
@@ -64,13 +65,7 @@ class SandboxPoolManager
             }
 
             if (stateStore.getDestroyState(poolName) == PoolDestroyState.DESTROYED) {
-                return PoolDestroyResult(
-                    poolName = poolName,
-                    state = PoolDestroyState.DESTROYED,
-                    drainedIdleCount = 0,
-                    killedIdleCount = 0,
-                    persistentStateCleared = false,
-                )
+                return destroyedResult(poolName)
             }
 
             val manager =
@@ -81,7 +76,11 @@ class SandboxPoolManager
             var drained = 0
             var killed = 0
             try {
-                stateStore.beginDestroy(poolName, ownerId)
+                try {
+                    stateStore.beginDestroy(poolName, ownerId)
+                } catch (e: PoolDestroyedException) {
+                    return destroyedResult(poolName)
+                }
                 val deadline = Instant.now().plus(options.drainTimeout)
                 while (true) {
                     val sandboxId = stateStore.tryTakeIdle(poolName) ?: break
@@ -131,6 +130,15 @@ class SandboxPoolManager
                 manager.close()
             }
         }
+
+        private fun destroyedResult(poolName: String): PoolDestroyResult =
+            PoolDestroyResult(
+                poolName = poolName,
+                state = PoolDestroyState.DESTROYED,
+                drainedIdleCount = 0,
+                killedIdleCount = 0,
+                persistentStateCleared = false,
+            )
 
         companion object {
             @JvmStatic

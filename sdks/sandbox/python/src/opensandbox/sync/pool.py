@@ -223,6 +223,8 @@ class SandboxPoolSync:
                         pool_name, pending_kill, source="acquire"
                     )
                     return sandbox
+                except PoolDestroyedException:
+                    raise
                 except Exception as exc:
                     idle_connect_failure = exc
                     self._state_store.remove_idle(pool_name, sandbox_id)
@@ -360,12 +362,12 @@ class SandboxPoolSync:
     def _run_reconcile_tick_locked(self, executor: ThreadPoolExecutor) -> None:
         if self._lifecycle_state != PoolLifecycleState.RUNNING:
             return
-        if self._state_store.get_destroy_state(self._config.pool_name) != PoolDestroyState.ACTIVE:
-            self._stop_after_pool_namespace_destroyed()
-            return
         self._begin_operation()
         try:
             if self._lifecycle_state != PoolLifecycleState.RUNNING:
+                return
+            if self._state_store.get_destroy_state(self._config.pool_name) != PoolDestroyState.ACTIVE:
+                self._stop_after_pool_namespace_destroyed()
                 return
             run_reconcile_tick(
                 config=self._config.with_max_idle(self._resolve_max_idle()),

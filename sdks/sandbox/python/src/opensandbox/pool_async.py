@@ -216,6 +216,8 @@ class SandboxPoolAsync:
                         pool_name, pending_kill, source="acquire"
                     )
                     return sandbox
+                except PoolDestroyedException:
+                    raise
                 except Exception as exc:
                     idle_connect_failure = exc
                     await self._state_store.remove_idle(pool_name, sandbox_id)
@@ -369,14 +371,14 @@ class SandboxPoolAsync:
         async with self._reconcile_lock:
             if self._lifecycle_state != PoolLifecycleState.RUNNING:
                 return
-            if await self._state_store.get_destroy_state(
-                self._config.pool_name
-            ) != PoolDestroyState.ACTIVE:
-                await self._stop_after_pool_namespace_destroyed()
-                return
             await self._begin_operation()
             try:
                 if self._lifecycle_state != PoolLifecycleState.RUNNING:
+                    return
+                if await self._state_store.get_destroy_state(
+                    self._config.pool_name
+                ) != PoolDestroyState.ACTIVE:
+                    await self._stop_after_pool_namespace_destroyed()
                     return
                 await run_async_reconcile_tick(
                     config=self._config.with_max_idle(await self._resolve_max_idle()),

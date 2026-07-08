@@ -208,6 +208,7 @@ class AsyncEndpointCache:
         except BaseException as e:
             if not future.done():
                 future.set_exception(e)
+                future.exception()
             raise
         finally:
             self._inflight.pop(key, None)
