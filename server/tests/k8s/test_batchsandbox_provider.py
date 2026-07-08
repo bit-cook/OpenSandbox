@@ -140,9 +140,14 @@ class TestBatchSandboxProvider:
             expires_at=expires_at,
             execd_image="execd:latest",
         )
-        
-        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
+        assert result == {
+            "name": "test-id",
+            "uid": "test-uid",
+            "apiVersion": "sandbox.opensandbox.io/v1alpha1",
+            "kind": "BatchSandbox",
+        }
+
         # Verify API call
         call_args = mock_k8s_client.create_custom_object.call_args
         body = call_args.kwargs["body"]
@@ -869,8 +874,13 @@ spec:
             execd_image="execd:latest",
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-    
+        assert result == {
+            "name": "test-id",
+            "uid": "test-uid",
+            "apiVersion": "sandbox.opensandbox.io/v1alpha1",
+            "kind": "BatchSandbox",
+        }
+
     # ===== Workload List Tests =====
 
     def test_list_workloads_returns_items(self, mock_k8s_client, mock_batchsandbox_list_response):
@@ -1324,8 +1334,13 @@ spec:
         )
 
         # Should succeed and return workload info
-        assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+        assert result == {
+            "name": "sandbox-test-id",
+            "uid": "test-uid",
+            "apiVersion": "sandbox.opensandbox.io/v1alpha1",
+            "kind": "BatchSandbox",
+        }
+
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1356,8 +1371,13 @@ spec:
         )
 
         # Should succeed and return workload info
-        assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+        assert result == {
+            "name": "sandbox-test-id",
+            "uid": "test-uid",
+            "apiVersion": "sandbox.opensandbox.io/v1alpha1",
+            "kind": "BatchSandbox",
+        }
+
         # Verify poolRef is used
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1385,9 +1405,14 @@ spec:
             execd_image="execd:latest",
             extensions={"poolRef": "my-pool"},
         )
-        
-        assert result == {"name": "sandbox-test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
-        
+
+        assert result == {
+            "name": "sandbox-test-id",
+            "uid": "test-uid",
+            "apiVersion": "sandbox.opensandbox.io/v1alpha1",
+            "kind": "BatchSandbox",
+        }
+
         # Verify the call
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
@@ -1620,7 +1645,9 @@ spec:
         task_template = body["spec"]["taskTemplate"]
         assert task_template["spec"]["process"]["env"] == [{"name": "VERSION", "value": "11"}]
 
-    def test_create_workload_poolref_none_entrypoint_no_env_omits_task_template(self, mock_k8s_client):
+    def test_create_workload_poolref_none_entrypoint_no_env_omits_task_template(
+        self, mock_k8s_client
+    ):
         """When entrypoint is None and env is empty, taskTemplate is omitted.
 
         SDK pool mode callers omit entrypoint entirely (None), expecting the pool's
@@ -2637,7 +2664,12 @@ spec:
             volumes=volumes,
         )
 
-        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "sandbox.opensandbox.io/v1alpha1", "kind": "BatchSandbox"}
+        assert result == {
+            "name": "test-id",
+            "uid": "test-uid",
+            "apiVersion": "sandbox.opensandbox.io/v1alpha1",
+            "kind": "BatchSandbox",
+        }
 
     def test_create_workload_poolref_rejects_platform(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -2698,8 +2730,11 @@ spec:
         main_container = pod_spec["containers"][0]
         mounts = main_container.get("volumeMounts", [])
         models_mount = next((m for m in mounts if m["name"] == "models-volume"), None)
+        models_volume = next((v for v in pod_spec["volumes"] if v["name"] == "models-volume"), None)
         assert models_mount is not None
         assert models_mount["readOnly"] is True
+        assert models_volume is not None
+        assert models_volume["persistentVolumeClaim"]["readOnly"] is True
 
     def test_create_workload_with_pvc_volume_subpath(self, mock_k8s_client):
         """
@@ -2961,7 +2996,10 @@ spec:
         # One volume definition for the shared PVC (first Volume name used)
         assert len(pod_spec["volumes"]) == 1
         assert pod_spec["volumes"][0]["name"] == "skills"
-        assert pod_spec["volumes"][0]["persistentVolumeClaim"]["claimName"] == "oss-pvc-r"
+        shared_volume = next((v for v in pod_spec["volumes"] if v["name"] == "skills"), None)
+        assert shared_volume is not None
+        assert shared_volume["persistentVolumeClaim"]["claimName"] == "oss-pvc-r"
+        assert shared_volume["persistentVolumeClaim"]["readOnly"] is True
 
         # Two volumeMounts, both referencing the same volume name
         mounts = pod_spec["containers"][0]["volumeMounts"]
