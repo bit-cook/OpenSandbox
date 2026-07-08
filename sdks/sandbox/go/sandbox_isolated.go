@@ -127,6 +127,32 @@ func (s *Sandbox) IsolatedDelete(ctx context.Context, sessionID string) error {
 	return s.execd.IsolatedDelete(ctx, sessionID)
 }
 
+// IsolationRunOnce creates an isolated session, runs the given code, and deletes the session.
+// It is a convenience wrapper for the create → run → delete lifecycle.
+func (s *Sandbox) IsolationRunOnce(ctx context.Context, req CreateIsolatedSessionRequest, run IsolatedRunRequest, handlers *ExecutionHandlers) (*Execution, error) {
+	session, err := s.IsolationCreate(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = session.Delete(context.Background())
+	}()
+	return session.Run(ctx, run, handlers)
+}
+
+// IsolationWithSession creates an isolated session, invokes fn, and deletes the session afterwards.
+// The session is always deleted regardless of whether fn returns an error.
+func (s *Sandbox) IsolationWithSession(ctx context.Context, req CreateIsolatedSessionRequest, fn func(*IsolationSession) error) error {
+	session, err := s.IsolationCreate(ctx, req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = session.Delete(context.Background())
+	}()
+	return fn(session)
+}
+
 // Deprecated: Use IsolationCapabilities instead.
 func (s *Sandbox) IsolatedCapabilities(ctx context.Context) (*IsolatedCapabilities, error) {
 	return s.IsolationCapabilities(ctx)

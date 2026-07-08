@@ -43,7 +43,11 @@ from opensandbox.models.isolated import (
 )
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.filesystem import Filesystem
-from opensandbox.services.isolated import IsolationService, IsolationSession
+from opensandbox.services.isolated import (
+    IsolationService,
+    IsolationServiceMixin,
+    IsolationSession,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +123,11 @@ class IsolationSessionHandle(IsolationSession):
         return await self._adapter._delete(self._info.session_id)
 
 
-class IsolatedSessionsAdapter(IsolationService):
-    """Async adapter for isolated session endpoints (/v1/isolated/*)."""
+class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
+    """Async adapter for isolated session endpoints (/v1/isolated/*).
+
+    ``run_once``/``session`` are inherited from :class:`IsolationServiceMixin`.
+    """
 
     CREATE_PATH = "/v1/isolated/session"
     SESSION_PATH = "/v1/isolated/session/{session_id}"

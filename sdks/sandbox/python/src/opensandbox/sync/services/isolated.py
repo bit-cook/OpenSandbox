@@ -17,6 +17,9 @@
 Synchronous isolated session service interface.
 """
 
+import logging
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any, Protocol
 
 from opensandbox.models.execd import Execution
@@ -27,7 +30,10 @@ from opensandbox.models.isolated import (
     IsolatedRunOpts,
     IsolatedSessionInfo,
     IsolatedSessionState,
+    IsolatedWorkspaceSpec,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class IsolationSessionSync(Protocol):
@@ -63,3 +69,80 @@ class IsolationServiceSync(Protocol):
     ) -> IsolationSessionSync: ...
 
     def capabilities(self) -> IsolatedCapabilities: ...
+
+    def run_once(
+        self,
+        code: str,
+        *,
+        workspace: str,
+        workspace_mode: str | None = None,
+        opts: IsolatedRunOpts | None = None,
+        handlers: ExecutionHandlersSync | None = None,
+        profile: str | None = None,
+        share_net: bool | None = None,
+    ) -> Execution:
+        """Create a session, run *code*, and delete the session (auto-cleanup)."""
+        ...
+
+    def session(
+        self,
+        request: CreateIsolatedSessionRequest,
+    ) -> AbstractContextManager[IsolationSessionSync]:
+        """Context manager: create a session and delete it on exit."""
+        ...
+
+
+class IsolationServiceSyncMixin:
+    """Default implementations for :class:`IsolationServiceSync` helpers.
+
+    Concrete adapters provide ``create``/``capabilities`` and inherit
+    ``run_once``/``session`` from this mixin (mirrors Kotlin's default
+    interface methods).
+    """
+
+    def create(
+        self, request: CreateIsolatedSessionRequest
+    ) -> IsolationSessionSync: ...
+
+    def run_once(
+        self,
+        code: str,
+        *,
+        workspace: str,
+        workspace_mode: str | None = None,
+        opts: IsolatedRunOpts | None = None,
+        handlers: ExecutionHandlersSync | None = None,
+        profile: str | None = None,
+        share_net: bool | None = None,
+    ) -> Execution:
+        request = CreateIsolatedSessionRequest(
+            workspace=IsolatedWorkspaceSpec(path=workspace, mode=workspace_mode),
+            profile=profile,
+            share_net=share_net,
+        )
+        session = self.create(request)
+        try:
+            return session.run(code, opts=opts, handlers=handlers)
+        finally:
+            try:
+                session.delete()
+            except Exception:
+                logger.warning(
+                    "failed to delete isolated session %s", session.session_id
+                )
+
+    @contextmanager
+    def session(
+        self,
+        request: CreateIsolatedSessionRequest,
+    ) -> Iterator[IsolationSessionSync]:
+        session = self.create(request)
+        try:
+            yield session
+        finally:
+            try:
+                session.delete()
+            except Exception:
+                logger.warning(
+                    "failed to delete isolated session %s", session.session_id
+                )

@@ -688,4 +688,59 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
             sandbox.commands().run("rm -rf " + prefix);
         }
     }
+
+    // ── run_once / withSession convenience API tests ─────────────────
+
+    @Test
+    @Order(33)
+    void testRunOnce() {
+        Execution exec = sandbox.isolation()
+                .runOnce("echo runonce-e2e", "/tmp", "rw", null, null, null, null);
+        assertTrue(stdoutText(exec).contains("runonce-e2e"));
+    }
+
+    @Test
+    @Order(34)
+    void testRunOnceWithEnvs() {
+        Execution exec = sandbox.isolation()
+                .runOnce(
+                        "echo $E2E_RUN_ONCE",
+                        "/tmp",
+                        "rw",
+                        Map.of("E2E_RUN_ONCE", "kt-value"),
+                        null,
+                        null,
+                        null);
+        assertTrue(stdoutText(exec).contains("kt-value"));
+    }
+
+    @Test
+    @Order(35)
+    void testWithSession() {
+        String output = sandbox.isolation().withSession(
+                new CreateIsolatedSessionRequest(
+                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                        "balanced", null, null, null, null, null, null),
+                session -> {
+                    session.run(new IsolatedRunRequest("export WS_VAR=with-session-kt", null, null));
+                    Execution exec = session.run(new IsolatedRunRequest("echo $WS_VAR", null, null));
+                    return stdoutText(exec);
+                });
+        assertTrue(output.contains("with-session-kt"));
+    }
+
+    @Test
+    @Order(36)
+    void testWithSessionMultiRun() {
+        String output = sandbox.isolation().withSession(
+                new CreateIsolatedSessionRequest(
+                        new IsolatedWorkspaceSpec("/tmp", "rw"),
+                        "balanced", null, null, null, null, null, null),
+                session -> {
+                    session.run(new IsolatedRunRequest("echo step1 > /tmp/ws_test_kt.txt", null, null));
+                    Execution exec = session.run(new IsolatedRunRequest("cat /tmp/ws_test_kt.txt", null, null));
+                    return stdoutText(exec);
+                });
+        assertTrue(output.contains("step1"));
+    }
 }

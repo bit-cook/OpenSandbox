@@ -37,7 +37,33 @@ export interface IsolationSession {
   delete(): Promise<void>;
 }
 
+export interface RunOnceOpts {
+  workspaceMode?: "rw" | "overlay" | "ro";
+  runOpts?: IsolatedRunOpts;
+  handlers?: ExecutionHandlers;
+  profile?: "strict" | "balanced";
+  shareNet?: boolean;
+  signal?: AbortSignal;
+}
+
 export interface IsolationService {
   create(request: CreateIsolatedSessionRequest): Promise<IsolationSession>;
   capabilities(): Promise<IsolatedCapabilities>;
+  /**
+   * Create a session, run `code`, and delete the session (auto-cleanup).
+   * Cleanup is best-effort and never masks the original error.
+   */
+  runOnce(
+    code: string,
+    workspace: string,
+    opts?: RunOnceOpts,
+  ): Promise<CommandExecution>;
+  /**
+   * Create a session, invoke `fn`, and delete the session on exit
+   * regardless of whether `fn` throws.
+   */
+  withSession<T>(
+    request: CreateIsolatedSessionRequest,
+    fn: (session: IsolationSession) => Promise<T>,
+  ): Promise<T>;
 }

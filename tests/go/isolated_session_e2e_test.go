@@ -974,3 +974,52 @@ func TestIsolationOverlayFilesAPIListDirectory(t *testing.T) {
 	}
 	assert.True(t, found, "expected child file in overlay directory listing")
 }
+
+// ---------------------------------------------------------------------------
+// RunOnce / WithSession convenience API tests
+// ---------------------------------------------------------------------------
+
+func TestIsolationRunOnce(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	exec, err := sb.IsolationRunOnce(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	}, opensandbox.IsolatedRunRequest{Code: "echo run-once-e2e"}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), "run-once-e2e")
+}
+
+func TestIsolationRunOnceWithEnvs(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	exec, err := sb.IsolationRunOnce(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	}, opensandbox.IsolatedRunRequest{
+		Code: "echo $E2E_VAR",
+		Envs: map[string]string{"E2E_VAR": "run-once-val"},
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, exec.Text(), "run-once-val")
+}
+
+func TestIsolationWithSessionE2E(t *testing.T) {
+	ctx, sb := createIsolatedTestSandbox(t)
+
+	var output string
+	err := sb.IsolationWithSession(ctx, opensandbox.CreateIsolatedSessionRequest{
+		Workspace: opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
+	}, func(session *opensandbox.IsolationSession) error {
+		_, err := session.Run(ctx, opensandbox.IsolatedRunRequest{Code: "export WS_VAR=with-session-val"}, nil)
+		if err != nil {
+			return err
+		}
+		exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{Code: "echo $WS_VAR"}, nil)
+		if err != nil {
+			return err
+		}
+		output = exec.Text()
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Contains(t, output, "with-session-val")
+}

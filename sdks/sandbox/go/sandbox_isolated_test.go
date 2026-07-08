@@ -1,0 +1,198 @@
+// Copyright 2026 Alibaba Group Holding Ltd.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package opensandbox
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+)
+
+func TestIsolationRunOnce_CreatesRunsDeletes(t *testing.T) {
+	var (
+		createCalled int32
+		runCalled    int32
+		deleteCalled int32
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/isolated/session":
+			atomic.AddInt32(&createCalled, 1)
+			jsonResponse(w, http.StatusCreated, map[string]string{
+				"session_id": "sess-test",
+				"created_at": "2026-01-01T00:00:00Z",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/isolated/session/sess-test/run":
+			atomic.AddInt32(&runCalled, 1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "data: {\"type\":\"complete\"}\n\n")
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/isolated/session/sess-test":
+			atomic.AddInt32(&deleteCalled, 1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	execd := NewExecdClient(srv.URL, "test-key")
+	sb := &Sandbox{id: "sbx-test", execd: execd}
+
+	req := CreateIsolatedSessionRequest{
+		Workspace: IsolatedWorkspaceSpec{Path: "/workspace", Mode: "overlay"},
+	}
+	run := IsolatedRunRequest{Code: "echo hello"}
+
+	_, err := sb.IsolationRunOnce(context.Background(), req, run, nil)
+	require.NoError(t, err)
+
+	if atomic.LoadInt32(&createCalled) != 1 {
+		assert.Fail(t, "create should be called once")
+	}
+	if atomic.LoadInt32(&runCalled) != 1 {
+		assert.Fail(t, "run should be called once")
+	}
+	if atomic.LoadInt32(&deleteCalled) != 1 {
+		assert.Fail(t, "delete should be called once")
+	}
+}
+
+func TestIsolationRunOnce_DeletesOnRunError(t *testing.T) {
+	var deleteCalled int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/isolated/session":
+			jsonResponse(w, http.StatusCreated, map[string]string{
+				"session_id": "sess-fail",
+				"created_at": "2026-01-01T00:00:00Z",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/isolated/session/sess-fail/run":
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/isolated/session/sess-fail":
+			atomic.AddInt32(&deleteCalled, 1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	execd := NewExecdClient(srv.URL, "test-key")
+	sb := &Sandbox{id: "sbx-test", execd: execd}
+
+	req := CreateIsolatedSessionRequest{
+		Workspace: IsolatedWorkspaceSpec{Path: "/workspace"},
+	}
+	run := IsolatedRunRequest{Code: "bad cmd"}
+
+	_, err := sb.IsolationRunOnce(context.Background(), req, run, nil)
+	if err == nil {
+		assert.Fail(t, "expected error from run")
+	}
+
+	if atomic.LoadInt32(&deleteCalled) != 1 {
+		assert.Fail(t, "delete should still be called on run failure")
+	}
+}
+
+func TestIsolationWithSession_CallbackAndCleanup(t *testing.T) {
+	var (
+		callbackCalled int32
+		deleteCalled   int32
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/isolated/session":
+			jsonResponse(w, http.StatusCreated, map[string]string{
+				"session_id": "sess-with",
+				"created_at": "2026-01-01T00:00:00Z",
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/isolated/session/sess-with":
+			atomic.AddInt32(&deleteCalled, 1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	execd := NewExecdClient(srv.URL, "test-key")
+	sb := &Sandbox{id: "sbx-test", execd: execd}
+
+	req := CreateIsolatedSessionRequest{
+		Workspace: IsolatedWorkspaceSpec{Path: "/workspace"},
+	}
+
+	err := sb.IsolationWithSession(context.Background(), req, func(s *IsolationSession) error {
+		atomic.AddInt32(&callbackCalled, 1)
+		if s.SessionID() != "sess-with" {
+			return fmt.Errorf("unexpected session id: %s", s.SessionID())
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	if atomic.LoadInt32(&callbackCalled) != 1 {
+		assert.Fail(t, "callback should be called once")
+	}
+	if atomic.LoadInt32(&deleteCalled) != 1 {
+		assert.Fail(t, "delete should be called once")
+	}
+}
+
+func TestIsolationWithSession_DeletesOnCallbackError(t *testing.T) {
+	var deleteCalled int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/isolated/session":
+			jsonResponse(w, http.StatusCreated, map[string]string{
+				"session_id": "sess-err",
+				"created_at": "2026-01-01T00:00:00Z",
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/isolated/session/sess-err":
+			atomic.AddInt32(&deleteCalled, 1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	execd := NewExecdClient(srv.URL, "test-key")
+	sb := &Sandbox{id: "sbx-test", execd: execd}
+
+	req := CreateIsolatedSessionRequest{
+		Workspace: IsolatedWorkspaceSpec{Path: "/workspace"},
+	}
+
+	err := sb.IsolationWithSession(context.Background(), req, func(s *IsolationSession) error {
+		return fmt.Errorf("callback error")
+	})
+	if err == nil {
+		assert.Fail(t, "expected error from callback")
+	}
+
+	if atomic.LoadInt32(&deleteCalled) != 1 {
+		assert.Fail(t, "delete should still be called on callback error")
+	}
+}

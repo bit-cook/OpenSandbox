@@ -19,7 +19,11 @@ import type { CommandExecution, ServerStreamEvent } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
 import type { SandboxFiles } from "../services/filesystem.js";
-import type { IsolationService, IsolationSession } from "../services/isolatedSessions.js";
+import type {
+  IsolationService,
+  IsolationSession,
+  RunOnceOpts,
+} from "../services/isolatedSessions.js";
 import type {
   CreateIsolatedSessionRequest,
   IsolatedCapabilities,
@@ -207,5 +211,34 @@ export class IsolatedSessionsAdapter implements IsolationService {
       "GET",
       "/v1/isolated/capabilities",
     );
+  }
+
+  async runOnce(
+    code: string,
+    workspace: string,
+    opts?: RunOnceOpts,
+  ): Promise<CommandExecution> {
+    const session = await this.create({
+      workspace: { path: workspace, mode: opts?.workspaceMode },
+      profile: opts?.profile,
+      share_net: opts?.shareNet,
+    });
+    try {
+      return await session.run(code, opts?.runOpts, opts?.handlers, opts?.signal);
+    } finally {
+      try { await session.delete(); } catch { /* best-effort cleanup */ }
+    }
+  }
+
+  async withSession<T>(
+    request: CreateIsolatedSessionRequest,
+    fn: (session: IsolationSession) => Promise<T>,
+  ): Promise<T> {
+    const session = await this.create(request);
+    try {
+      return await fn(session);
+    } finally {
+      try { await session.delete(); } catch { /* best-effort cleanup */ }
+    }
   }
 }

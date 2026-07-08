@@ -674,4 +674,45 @@ describe("IsolatedSession E2E", () => {
       await session.delete();
     }
   });
+
+  // ── runOnce / withSession convenience API tests ──────────────────
+
+  it("test_runOnce", async () => {
+    const result = await sandbox.isolation.runOnce("echo runonce-e2e", "/tmp", {
+      workspaceMode: "rw",
+    });
+    expect(result.logs.stdout.some(m => m.text.includes("runonce-e2e"))).toBe(true);
+  });
+
+  it("test_runOnce_with_envs", async () => {
+    const result = await sandbox.isolation.runOnce("echo $E2E_RUN_ONCE", "/tmp", {
+      workspaceMode: "rw",
+      runOpts: { envs: { E2E_RUN_ONCE: "js-value" } },
+    });
+    expect(result.logs.stdout.some(m => m.text.includes("js-value"))).toBe(true);
+  });
+
+  it("test_withSession", async () => {
+    const output = await sandbox.isolation.withSession(
+      { workspace: { path: "/tmp", mode: "rw" } },
+      async (session) => {
+        await session.run("export WS_VAR=with-session-js");
+        const r = await session.run("echo $WS_VAR");
+        return r.logs.stdout.map(m => m.text).join("");
+      },
+    );
+    expect(output).toContain("with-session-js");
+  });
+
+  it("test_withSession_multi_run", async () => {
+    const output = await sandbox.isolation.withSession(
+      { workspace: { path: "/tmp", mode: "rw" } },
+      async (session) => {
+        await session.run("echo step1 > /tmp/ws_test.txt");
+        const r = await session.run("cat /tmp/ws_test.txt");
+        return r.logs.stdout.map(m => m.text).join("");
+      },
+    );
+    expect(output).toContain("step1");
+  });
 });

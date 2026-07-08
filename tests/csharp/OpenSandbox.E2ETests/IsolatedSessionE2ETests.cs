@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using OpenSandbox;
 using OpenSandbox.Core;
 using OpenSandbox.Models;
 using Xunit;
@@ -787,5 +788,55 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             await session.DeleteAsync();
             await _sandbox.Commands.RunAsync($"rm -rf {prefix}");
         }
+    }
+
+    // ── RunOnceAsync / WithSessionAsync convenience API tests ────────
+
+    [Fact]
+    public async Task TestRunOnce()
+    {
+        var exec = await _sandbox!.Isolation.RunOnceAsync(
+            "echo runonce-e2e", "/tmp", workspaceMode: "rw");
+        Assert.Contains("runonce-e2e", StdoutText(exec));
+    }
+
+    [Fact]
+    public async Task TestRunOnceWithEnvs()
+    {
+        var exec = await _sandbox!.Isolation.RunOnceAsync(
+            "echo $E2E_RUN_ONCE",
+            "/tmp",
+            workspaceMode: "rw",
+            opts: new IsolatedRunOpts(
+                new Dictionary<string, string> { ["E2E_RUN_ONCE"] = "cs-value" }));
+        Assert.Contains("cs-value", StdoutText(exec));
+    }
+
+    [Fact]
+    public async Task TestWithSession()
+    {
+        var output = await _sandbox!.Isolation.WithSessionAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")),
+            async session =>
+            {
+                await session.RunAsync("export WS_VAR=with-session-cs");
+                var exec = await session.RunAsync("echo $WS_VAR");
+                return StdoutText(exec);
+            });
+        Assert.Contains("with-session-cs", output);
+    }
+
+    [Fact]
+    public async Task TestWithSessionMultiRun()
+    {
+        var output = await _sandbox!.Isolation.WithSessionAsync(
+            new CreateIsolatedSessionRequest(new IsolatedWorkspaceSpec("/tmp", "rw")),
+            async session =>
+            {
+                await session.RunAsync("echo step1 > /tmp/ws_test_cs.txt");
+                var exec = await session.RunAsync("cat /tmp/ws_test_cs.txt");
+                return StdoutText(exec);
+            });
+        Assert.Contains("step1", output);
     }
 }

@@ -32,6 +32,7 @@ import type { ExecdCommands } from "./services/execdCommands.js";
 import type { ExecdHealth } from "./services/execdHealth.js";
 import type { ExecdMetrics } from "./services/execdMetrics.js";
 import type { IsolationService, IsolationSession } from "./services/isolatedSessions.js";
+import type { CommandExecution } from "./models/execd.js";
 import type { IsolatedCapabilities } from "./models/isolated.js";
 import type {
   CreateSandboxRequest,
@@ -56,6 +57,12 @@ const unavailableIsolation: IsolationService = {
   },
   capabilities(): Promise<IsolatedCapabilities> {
     return Promise.resolve({ available: false, commit_supported: false, diff_supported: false });
+  },
+  runOnce(): Promise<CommandExecution> {
+    throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
+  },
+  withSession<T>(): Promise<T> {
+    throw new Error("Isolation is not available: the adapter factory did not provide an IsolationService");
   },
 };
 const CREDENTIAL_VAULT_METHODS = [

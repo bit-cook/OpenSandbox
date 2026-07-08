@@ -42,6 +42,7 @@ from opensandbox.sync.adapters.converter.execution_event_dispatcher import (
 )
 from opensandbox.sync.services.isolated import (
     IsolationServiceSync,
+    IsolationServiceSyncMixin,
     IsolationSessionSync,
 )
 
@@ -125,8 +126,12 @@ class IsolationSessionHandleSync(IsolationSessionSync):
         return self._adapter._delete(self._info.session_id)
 
 
-class IsolatedSessionsAdapterSync(IsolationServiceSync):
-    """Synchronous adapter for isolated session endpoints."""
+class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSync):
+    """Synchronous adapter for isolated session endpoints.
+
+    ``run_once``/``session`` are inherited from
+    :class:`IsolationServiceSyncMixin`.
+    """
 
     CREATE_PATH = "/v1/isolated/session"
     SESSION_PATH = "/v1/isolated/session/{session_id}"

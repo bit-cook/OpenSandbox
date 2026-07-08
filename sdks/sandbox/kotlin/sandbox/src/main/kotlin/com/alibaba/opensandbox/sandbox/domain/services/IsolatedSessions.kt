@@ -22,6 +22,10 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapa
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedSessionState
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
+import org.slf4j.LoggerFactory
+
+private val isolationServiceLogger = LoggerFactory.getLogger(IsolationService::class.java)
 
 interface IsolationSession {
     val sessionId: String
@@ -41,4 +45,50 @@ interface IsolationService {
     fun create(request: CreateIsolatedSessionRequest): IsolationSession
 
     fun capabilities(): IsolatedCapabilities
+
+    fun runOnce(
+        code: String,
+        workspace: String,
+        workspaceMode: String? = null,
+        envs: Map<String, String>? = null,
+        timeoutSeconds: Int? = null,
+        profile: String? = null,
+        shareNet: Boolean? = null,
+    ): Execution {
+        val session =
+            create(
+                CreateIsolatedSessionRequest(
+                    workspace = IsolatedWorkspaceSpec(path = workspace, mode = workspaceMode),
+                    profile = profile,
+                    shareNet = shareNet,
+                ),
+            )
+        try {
+            return session.run(
+                IsolatedRunRequest(code = code, envs = envs, timeoutSeconds = timeoutSeconds),
+            )
+        } finally {
+            try {
+                session.delete()
+            } catch (e: Exception) {
+                isolationServiceLogger.warn("failed to delete isolated session {}", session.sessionId, e)
+            }
+        }
+    }
+
+    fun <T> withSession(
+        request: CreateIsolatedSessionRequest,
+        block: (IsolationSession) -> T,
+    ): T {
+        val session = create(request)
+        try {
+            return block(session)
+        } finally {
+            try {
+                session.delete()
+            } catch (e: Exception) {
+                isolationServiceLogger.warn("failed to delete isolated session {}", session.sessionId, e)
+            }
+        }
+    }
 }
