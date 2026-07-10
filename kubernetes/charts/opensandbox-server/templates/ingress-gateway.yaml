@@ -73,6 +73,10 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "opensandbox-server.ingressGatewayFullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.server.gateway.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
