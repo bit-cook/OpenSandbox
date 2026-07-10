@@ -1542,6 +1542,56 @@ class TestCreateSandboxPvcFailureCleanup:
         k8s_service.workload_provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_shared_pvc_mixed_read_only_rejected_before_pvc_creation(
+        self, k8s_service
+    ):
+        from opensandbox_server.api.schema import (
+            CreateSandboxRequest,
+            ImageSpec,
+            PVC,
+            ResourceLimits,
+            Volume,
+        )
+
+        request = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash", "-c", "sleep 3600"],
+            timeout=3600,
+            resourceLimits=ResourceLimits(root={"cpu": "1", "memory": "1Gi"}),
+            volumes=[
+                Volume(
+                    name="shared-rw",
+                    mountPath="/data/rw",
+                    readOnly=False,
+                    pvc=PVC(
+                        claimName="auto-data",
+                        createIfNotExists=True,
+                        deleteOnSandboxTermination=True,
+                    ),
+                ),
+                Volume(
+                    name="shared-ro",
+                    mountPath="/data/ro",
+                    readOnly=True,
+                    pvc=PVC(
+                        claimName="auto-data",
+                        createIfNotExists=True,
+                        deleteOnSandboxTermination=True,
+                    ),
+                ),
+            ],
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "mixed read_only values" in exc_info.value.detail["message"]
+        k8s_service.k8s_client.create_pvc.assert_not_called()
+        k8s_service.workload_provider.create_workload.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_pvc_cleanup_runs_when_wait_for_ready_rollback_reports_not_found(
         self, k8s_service, mock_workload
     ):
