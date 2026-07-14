@@ -269,6 +269,12 @@ class SQLiteSnapshotRepository:
             )
             self._migrate_add_namespace(conn)
             self._migrate_namespace_nullable(conn)
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_snapshots_name_namespace
+                    ON snapshots(name, namespace)
+                """
+            )
 
     @staticmethod
     def _migrate_add_namespace(conn: sqlite3.Connection) -> None:

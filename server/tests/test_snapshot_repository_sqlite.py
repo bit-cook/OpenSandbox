@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sqlite3
 from datetime import datetime, timedelta
 
 from opensandbox_server.repositories.snapshots.factory import create_snapshot_repository
@@ -77,6 +78,50 @@ def test_sqlite_snapshot_repository_enables_wal_and_busy_timeout(tmp_path) -> No
 
     assert journal_mode.lower() == "wal"
     assert busy_timeout == SQLITE_BUSY_TIMEOUT_MS
+
+
+def test_sqlite_snapshot_repository_indexes_name_queries_after_migration(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy-snapshots.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE snapshots (
+                id TEXT PRIMARY KEY,
+                source_sandbox_id TEXT NOT NULL,
+                name TEXT,
+                description TEXT,
+                restore_config TEXT NOT NULL,
+                state TEXT NOT NULL,
+                reason TEXT,
+                message TEXT,
+                last_transition_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    repo = SQLiteSnapshotRepository(db_path)
+
+    with repo._connect() as conn:
+        indexes = {row["name"] for row in conn.execute("PRAGMA index_list(snapshots)")}
+        name_plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM snapshots WHERE name = ?",
+            ("cache-key",),
+        ).fetchall()
+        tenant_plan = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT COUNT(*) FROM snapshots WHERE namespace = ? AND name = ?
+            """,
+            ("tenant-a", "cache-key"),
+        ).fetchall()
+
+    assert "idx_snapshots_name_namespace" in indexes
+    assert any("idx_snapshots_name_namespace" in row["detail"] for row in name_plan)
+    assert any("idx_snapshots_name_namespace" in row["detail"] for row in tenant_plan)
 
 
 def test_sqlite_snapshot_repository_lists_and_updates_records(tmp_path) -> None:
