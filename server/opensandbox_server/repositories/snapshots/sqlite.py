@@ -109,6 +109,10 @@ class SQLiteSnapshotRepository:
             clauses.append("source_sandbox_id = ?")
             params.append(query.source_sandbox_id)
 
+        if query.name is not None:
+            clauses.append("name = ?")
+            params.append(query.name)
+
         if query.states:
             clauses.append(
                 f"state IN ({', '.join('?' for _ in query.states)})"

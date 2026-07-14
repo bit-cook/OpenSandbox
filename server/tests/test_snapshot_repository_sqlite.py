@@ -91,11 +91,23 @@ def test_sqlite_snapshot_repository_lists_and_updates_records(tmp_path) -> None:
     repo.create(third)
 
     page = repo.list(
-        SnapshotListQuery(page=1, page_size=10, source_sandbox_id="sbx-001", states=["Ready"])
+        SnapshotListQuery(
+            page=1,
+            page_size=10,
+            source_sandbox_id="sbx-001",
+            name="name-snap-002",
+            states=["Ready"],
+        )
     )
 
     assert page.total_items == 1
     assert [item.id for item in page.items] == ["snap-002"]
+
+    partial_name = repo.list(
+        SnapshotListQuery(page=1, page_size=10, name="name-snap")
+    )
+    assert partial_name.total_items == 0
+    assert partial_name.items == []
 
     updated = SnapshotRecord(
         id=first.id,
