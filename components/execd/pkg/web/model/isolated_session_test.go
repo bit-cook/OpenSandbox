@@ -74,13 +74,13 @@ func TestSessionState_JSONRoundtrip(t *testing.T) {
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
 
 	state := SessionState{
-		Status:    "active",
-		CreatedAt: now,
-		LastRunAt: now,
-		Profile:   "balanced",
-		Workspace: &WorkspaceSpec{Path: "/tmp/ws", Mode: "overlay"},
-		ExtraWritable: []string{"/allowed"},
-		Binds: []BindMount{{Source: "/host/src", Dest: "/mnt/src", ReadOnly: true}},
+		Status:             "active",
+		CreatedAt:          now,
+		LastRunAt:          now,
+		Profile:            "balanced",
+		Workspace:          &WorkspaceSpec{Path: "/tmp/ws", Mode: "overlay"},
+		ExtraWritable:      []string{"/allowed"},
+		Binds:              []BindMount{{Source: "/host/src", Dest: "/mnt/src", ReadOnly: true}},
 		ShareNet:           &shareNet,
 		EnvPassthrough:     &EnvPassthroughSpec{Mode: "allow", Keys: []string{"HOME"}},
 		Uid:                &uid,
