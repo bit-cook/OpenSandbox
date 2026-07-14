@@ -204,6 +204,19 @@ func (r *IsolatedRunner) GetIsolatedSession(id string) (*IsolatedSessionState, e
 		Status:    status,
 		CreatedAt: s.createdAt,
 		LastRunAt: s.lastRunAt,
+
+		Profile:            s.opts.Profile,
+		WorkspacePath:      s.opts.WorkspacePath,
+		WorkspaceMode:      s.opts.WorkspaceMode,
+		ExtraWritable:      s.opts.ExtraWritable,
+		Binds:              s.opts.Binds,
+		ShareNet:           s.opts.ShareNet,
+		EnvPassthroughMode: s.opts.EnvPassthroughMode,
+		EnvPassthroughKeys: s.opts.EnvPassthroughKeys,
+		Uid:                s.opts.Uid,
+		Gid:                s.opts.Gid,
+		UidMode:            s.opts.UidMode,
+		IdleTimeoutSeconds: s.opts.IdleTimeoutSeconds,
 	}
 
 	if s.opts.IdleTimeoutSeconds > 0 {
@@ -224,11 +237,30 @@ const (
 )
 
 // IsolatedSessionState is returned by GetIsolatedSession.
+//
+// Runtime status fields are always populated. Creation-parameter fields
+// echo the parameters used to create the session so a stateless client can
+// rebuild a session handle from just a sessionId.
 type IsolatedSessionState struct {
 	Status               string
 	CreatedAt            time.Time
 	LastRunAt            time.Time
 	IdleRemainingSeconds *int
+
+	// Creation-parameter echoes. Populated for sessions the current execd
+	// process created; snapshot of the *IsolatedSessionOptions at GET time.
+	Profile            string
+	WorkspacePath      string
+	WorkspaceMode      string
+	ExtraWritable      []string
+	Binds              []isolation.BindMount
+	ShareNet           *bool
+	EnvPassthroughMode string
+	EnvPassthroughKeys []string
+	Uid                *uint32
+	Gid                *uint32
+	UidMode            string
+	IdleTimeoutSeconds int
 }
 
 // IsolatedSessionSummary describes a single session in a list response.

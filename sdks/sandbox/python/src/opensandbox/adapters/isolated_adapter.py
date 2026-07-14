@@ -80,6 +80,40 @@ def _infer_exit_code(execution: Execution) -> int | None:
     return None
 
 
+# Creation-parameter fields execd may echo back in GET /v1/isolated/session/{id}.
+# Older execd builds omit them; when absent we leave the info field as None so
+# the returned handle is still usable via session_id for run/get/delete/files.
+_ATTACH_ECHO_FIELDS = (
+    "profile",
+    "workspace",
+    "extra_writable",
+    "binds",
+    "share_net",
+    "env_passthrough",
+    "uid",
+    "gid",
+    "uid_mode",
+    "idle_timeout_seconds",
+)
+
+
+def _build_attach_info(session_id: str, state: dict) -> IsolatedSessionInfo:
+    """Build an :class:`IsolatedSessionInfo` from a ``GET`` session state payload.
+
+    Only fields actually returned by execd are forwarded; missing fields fall
+    back to the model defaults (``None``). ``session_id`` comes from the
+    caller because the endpoint identifies the session by path, not payload.
+    """
+    payload: dict = {"session_id": session_id}
+    created_at = state.get("created_at")
+    if created_at is not None:
+        payload["created_at"] = created_at
+    for key in _ATTACH_ECHO_FIELDS:
+        if key in state and state[key] is not None:
+            payload[key] = state[key]
+    return IsolatedSessionInfo(**payload)
+
+
 class IsolationSessionHandle(IsolationSession):
     """Async handle to a single isolated session."""
 
@@ -197,6 +231,23 @@ class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
                 )
             data = response.json()
             info = IsolatedSessionInfo(**data)
+            return IsolationSessionHandle(info, self)
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    async def attach(self, session_id: str) -> IsolationSessionHandle:
+        if not (session_id and session_id.strip()):
+            raise InvalidArgumentException("session_id cannot be empty")
+        try:
+            url = self._get_url(self.SESSION_PATH.format(session_id=session_id))
+            response = await self._httpx_client.get(url)
+            if response.status_code != 200:
+                raise SandboxApiException(
+                    message=f"attach isolated session failed. Status: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
+            info = _build_attach_info(session_id, response.json())
             return IsolationSessionHandle(info, self)
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e

@@ -142,12 +142,46 @@ func (c *IsolatedSessionController) Get() {
 		return
 	}
 
-	c.RespondSuccess(model.SessionState{
+	resp := model.SessionState{
 		Status:               state.Status,
 		CreatedAt:            state.CreatedAt,
 		LastRunAt:            state.LastRunAt,
 		IdleRemainingSeconds: state.IdleRemainingSeconds,
-	})
+
+		Profile:       state.Profile,
+		ExtraWritable: state.ExtraWritable,
+		ShareNet:      state.ShareNet,
+		Uid:           state.Uid,
+		Gid:           state.Gid,
+		UidMode:       state.UidMode,
+	}
+	if state.WorkspacePath != "" {
+		resp.Workspace = &model.WorkspaceSpec{
+			Path: state.WorkspacePath,
+			Mode: state.WorkspaceMode,
+		}
+	}
+	if len(state.Binds) > 0 {
+		resp.Binds = make([]model.BindMount, 0, len(state.Binds))
+		for _, b := range state.Binds {
+			resp.Binds = append(resp.Binds, model.BindMount{
+				Source:   b.Source,
+				Dest:     b.Dest,
+				ReadOnly: b.ReadOnly,
+			})
+		}
+	}
+	if state.EnvPassthroughMode != "" || len(state.EnvPassthroughKeys) > 0 {
+		resp.EnvPassthrough = &model.EnvPassthroughSpec{
+			Mode: state.EnvPassthroughMode,
+			Keys: state.EnvPassthroughKeys,
+		}
+	}
+	if state.IdleTimeoutSeconds > 0 {
+		v := state.IdleTimeoutSeconds
+		resp.IdleTimeoutSeconds = &v
+	}
+	c.RespondSuccess(resp)
 }
 
 // List handles GET /v1/isolated/sessions.

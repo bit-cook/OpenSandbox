@@ -143,6 +143,95 @@ func TestGetIsolatedSession_Found(t *testing.T) {
 	runner.DeleteIsolatedSession(id)
 }
 
+// TestGetIsolatedSession_ReturnsCreationParams verifies GetIsolatedSession
+// echoes back the parameters the session was created with, so a
+// stateless client (that only holds the sessionId) can rebuild a session
+// handle without needing to have retained the original create request.
+func TestGetIsolatedSession_ReturnsCreationParams(t *testing.T) {
+	runner := newTestRunner(t)
+
+	// Extend the runner's writable allowlist so a bind can be validated.
+	bindSrc := filepath.Join(t.TempDir(), "bind-src")
+	if err := os.MkdirAll(bindSrc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	extraDir := filepath.Join(t.TempDir(), "extra")
+	if err := os.MkdirAll(extraDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner.allowedWritable = []string{bindSrc, extraDir}
+
+	shareNet := true
+	uid := uint32(1234)
+	gid := uint32(5678)
+
+	opts := &IsolatedSessionOptions{
+		Profile:            "balanced",
+		WorkspacePath:      filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode:      "overlay",
+		ExtraWritable:      []string{extraDir},
+		Binds:              []isolation.BindMount{{Source: bindSrc, Dest: "/mnt/in", ReadOnly: true}},
+		ShareNet:           &shareNet,
+		EnvPassthroughMode: "allow",
+		EnvPassthroughKeys: []string{"HOME", "PATH"},
+		Uid:                &uid,
+		Gid:                &gid,
+		UidMode:            "setpriv",
+		IdleTimeoutSeconds: 900,
+	}
+
+	id, err := runner.CreateIsolatedSession(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	state, err := runner.GetIsolatedSession(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if state.Profile != "balanced" {
+		t.Errorf("Profile = %q, want balanced", state.Profile)
+	}
+	if state.WorkspacePath == "" {
+		t.Error("WorkspacePath is empty")
+	}
+	if state.WorkspaceMode != "overlay" {
+		t.Errorf("WorkspaceMode = %q, want overlay", state.WorkspaceMode)
+	}
+	if len(state.ExtraWritable) != 1 {
+		t.Errorf("ExtraWritable len = %d, want 1", len(state.ExtraWritable))
+	}
+	if len(state.Binds) != 1 || state.Binds[0].Dest != "/mnt/in" || !state.Binds[0].ReadOnly {
+		t.Errorf("Binds = %+v, want [{Source:%s Dest:/mnt/in ReadOnly:true}]", state.Binds, bindSrc)
+	}
+	if state.ShareNet == nil || !*state.ShareNet {
+		t.Error("ShareNet not echoed")
+	}
+	if state.EnvPassthroughMode != "allow" {
+		t.Errorf("EnvPassthroughMode = %q, want allow", state.EnvPassthroughMode)
+	}
+	if len(state.EnvPassthroughKeys) != 2 {
+		t.Errorf("EnvPassthroughKeys len = %d, want 2", len(state.EnvPassthroughKeys))
+	}
+	if state.Uid == nil || *state.Uid != 1234 {
+		t.Errorf("Uid = %v, want 1234", state.Uid)
+	}
+	if state.Gid == nil || *state.Gid != 5678 {
+		t.Errorf("Gid = %v, want 5678", state.Gid)
+	}
+	if state.UidMode != "setpriv" {
+		t.Errorf("UidMode = %q, want setpriv", state.UidMode)
+	}
+	if state.IdleTimeoutSeconds != 900 {
+		t.Errorf("IdleTimeoutSeconds = %d, want 900", state.IdleTimeoutSeconds)
+	}
+	if state.IdleRemainingSeconds == nil {
+		t.Error("IdleRemainingSeconds nil despite IdleTimeoutSeconds > 0")
+	}
+}
+
 func TestDeleteIsolatedSession_NotFound(t *testing.T) {
 	runner := newTestRunner(t)
 	err := runner.DeleteIsolatedSession("nonexistent")
