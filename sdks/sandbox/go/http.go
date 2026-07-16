@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"time"
 )
@@ -70,9 +71,14 @@ type Client struct {
 // Connection setup is still bounded by the transport's DialTimeout,
 // TLSHandshakeTimeout, and ResponseHeaderTimeout (the wait for response
 // headers); only the (unbounded) body read is uncapped.
+//
+// The dedicated client is a shallow copy of the configured httpClient, so any
+// caller-provided CookieJar / CheckRedirect policy still applies to streams;
+// only Timeout (cleared) and Transport (replaced) differ.
 func (c *Client) streamHTTPClient() *http.Client {
 	c.streamOnce.Do(func() {
-		sc := &http.Client{} // Timeout: 0 -> no overall request timeout
+		sc := *c.httpClient // shallow copy: keep Jar, CheckRedirect, etc.
+		sc.Timeout = 0      // no overall request timeout for long-lived streams
 		if tr, ok := c.httpClient.Transport.(*http.Transport); ok && tr != nil {
 			clone := tr.Clone()
 			clone.DisableKeepAlives = true // do not pool/reuse stream connections
@@ -86,11 +92,10 @@ func (c *Client) streamHTTPClient() *http.Client {
 				clone.ResponseHeaderTimeout = streamResponseHeaderTimeout
 			}
 			sc.Transport = clone
-		} else {
-			// Custom RoundTripper: reuse it as-is (cannot toggle keep-alives).
-			sc.Transport = c.httpClient.Transport
 		}
-		c.streamClient = sc
+		// else: custom RoundTripper is kept as-is via the shallow copy
+		// (cannot toggle keep-alives on an unknown transport).
+		c.streamClient = &sc
 	})
 	return c.streamClient
 }
@@ -180,17 +185,21 @@ func NewClient(baseURL, apiKey, authHeader string, opts ...Option) *Client {
 // For idempotent requests (GET/HEAD) it also transparently recovers from a
 // stale pooled connection: some load balancers silently drop idle keep-alive
 // connections without sending a FIN, so a reused connection can hang until the
-// request timeout. On such a connection-level failure the client purges idle
-// connections and retries once on a fresh connection. This is always on and
+// request timeout. When such a failure happens on a REUSED pooled connection
+// the client purges idle connections and retries once on a fresh connection.
+// The retry is gated on the failed attempt having reused a pooled connection
+// (observed via httptrace), so a slow server hit over a brand-new connection is
+// not retried and cannot double the effective timeout. This is always on and
 // independent of the opt-in RetryConfig.
 func (c *Client) doRequest(ctx context.Context, method, path string, body any, result any) error {
 	return c.withRetry(ctx, func() error {
-		err := c.doRequestOnce(ctx, method, path, body, result)
-		if err != nil && c.shouldRetryOnFreshConn(ctx, method, err) {
-			// The pooled connection may have been silently dropped by an
+		var reused bool
+		err := c.doRequestOnce(ctx, method, path, body, result, &reused)
+		if err != nil && reused && c.shouldRetryOnFreshConn(ctx, method, err) {
+			// The reused pooled connection was likely silently dropped by an
 			// intermediary. Drop idle connections so the retry dials a new one.
 			c.httpClient.CloseIdleConnections()
-			err = c.doRequestOnce(ctx, method, path, body, result)
+			err = c.doRequestOnce(ctx, method, path, body, result, nil)
 		}
 		return err
 	})
@@ -201,7 +210,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, r
 // for response headers, connection resets/EOF) that typically mean a reused
 // pooled connection was already dead. It is restricted to idempotent methods
 // and never fires when the caller's context is done (respecting cancellation)
-// or when the server actually responded with an error status.
+// or when the server actually responded with an error status. The caller
+// additionally gates this on the failed attempt having reused a pooled
+// connection.
 func (c *Client) shouldRetryOnFreshConn(ctx context.Context, method string, err error) bool {
 	if err == nil {
 		return false
@@ -228,8 +239,10 @@ func (c *Client) shouldRetryOnFreshConn(ctx context.Context, method string, err 
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
-// doRequestOnce is the single-attempt implementation of doRequest.
-func (c *Client) doRequestOnce(ctx context.Context, method, path string, body any, result any) error {
+// doRequestOnce is the single-attempt implementation of doRequest. If reused is
+// non-nil it is set to whether this attempt was carried over a reused pooled
+// connection (observed via httptrace GotConn).
+func (c *Client) doRequestOnce(ctx context.Context, method, path string, body any, result any, reused *bool) error {
 	var bodyReader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -237,6 +250,14 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 			return fmt.Errorf("opensandbox: marshal request: %w", err)
 		}
 		bodyReader = bytes.NewReader(buf)
+	}
+
+	if reused != nil {
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				*reused = info.Reused
+			},
+		})
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)

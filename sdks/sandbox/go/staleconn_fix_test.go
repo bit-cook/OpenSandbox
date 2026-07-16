@@ -26,6 +26,11 @@ package opensandbox
 
 import (
 	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -150,4 +155,31 @@ func TestStaleConn_NonIdempotentNotRetried(t *testing.T) {
 	err := c.doRequest(context.Background(), "POST", "/", map[string]string{"a": "b"}, nil)
 	require.Error(t, err, "POST must not be transparently retried on a fresh connection")
 	assert.Contains(t, err.Error(), "Client.Timeout exceeded while awaiting headers")
+}
+
+// TestStaleConn_FreshConnTimeoutNotRetried verifies the fresh-connection retry
+// is gated on connection REUSE: a GET whose FIRST (brand-new) connection simply
+// times out against a slow server must NOT be retried, otherwise a slow server
+// would be hit twice and the effective timeout would roughly double. This is
+// the guard requested in PR review: only reused pooled connections are retried.
+func TestStaleConn_FreshConnTimeoutNotRetried(t *testing.T) {
+	var hits int32
+	// Every request blocks past the client timeout (never sends headers), so a
+	// first attempt on a fresh connection always times out.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		time.Sleep(2 * time.Second)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "k", "OPEN-SANDBOX-API-KEY", WithTimeout(200*time.Millisecond))
+
+	// GET on a fresh connection: times out as a net.Error, but was NOT reused,
+	// so it must fail after exactly one attempt.
+	err := c.doRequest(context.Background(), http.MethodGet, "/", nil, nil)
+	require.Error(t, err, "slow fresh-connection GET must fail (timeout)")
+	var netErr net.Error
+	require.True(t, errors.As(err, &netErr), "error should be a net timeout")
+	require.Equal(t, int32(1), atomic.LoadInt32(&hits),
+		"a fresh-connection timeout must NOT be retried (would double the timeout)")
 }

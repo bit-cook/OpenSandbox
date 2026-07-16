@@ -23,6 +23,7 @@ package opensandbox
 import (
 	"context"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -113,4 +114,30 @@ func TestStreaming_HeaderTimeoutBounded(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stream hung waiting for response headers; ResponseHeaderTimeout not enforced")
 	}
+}
+
+// TestStreaming_PreservesCustomClientState verifies the dedicated SSE client is
+// a shallow copy of the caller-provided http.Client, so a CookieJar (and other
+// client-level policy such as CheckRedirect) still applies to streams. Before
+// the fix the SSE client started from an empty http.Client and only copied the
+// transport, silently dropping such settings for /command and /metrics/watch.
+func TestStreaming_PreservesCustomClientState(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	redirect := func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
+
+	custom := &http.Client{Jar: jar, CheckRedirect: redirect, Transport: DefaultTransport()}
+	client := NewExecdClient("https://example.com", "tok", WithHTTPClient(custom))
+
+	sc := client.client.streamHTTPClient()
+	require.Equal(t, jar, sc.Jar, "streaming client must preserve the caller's CookieJar")
+	require.True(t, sc.CheckRedirect != nil, "streaming client must preserve CheckRedirect")
+	require.Equal(t, time.Duration(0), sc.Timeout, "streaming client must clear the overall timeout")
+
+	// Transport is still the non-pooled, header-bounded clone (not the original).
+	tr, ok := sc.Transport.(*http.Transport)
+	require.True(t, ok, "streaming transport should be *http.Transport")
+	require.True(t, tr.DisableKeepAlives, "streaming transport must disable keep-alive")
+	require.Equal(t, streamResponseHeaderTimeout, tr.ResponseHeaderTimeout,
+		"streaming transport must bound the response-header wait")
 }
