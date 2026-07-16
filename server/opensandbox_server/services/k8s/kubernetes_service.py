@@ -343,19 +343,32 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         has_pool_ref: bool,
     ) -> None:
         """Reject request fields that pooled pods cannot honor."""
-        if not has_pool_ref or request.network_policy is None:
+        if not has_pool_ref:
             return
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": (
-                    "networkPolicy cannot be used together with extensions.poolRef "
-                    "because pooled pods are pre-created. Remove 'networkPolicy' "
-                    "from the request or use template mode."
-                ),
-            },
-        )
+        if request.network_policy is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "networkPolicy cannot be used together with extensions.poolRef "
+                        "because pooled pods are pre-created. Remove 'networkPolicy' "
+                        "from the request or use template mode."
+                    ),
+                },
+            )
+        if request.credential_proxy and request.credential_proxy.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "credentialProxy.enabled cannot be used together with "
+                        "extensions.poolRef because pooled pods are pre-created. "
+                        "Disable credential proxy or use template mode."
+                    ),
+                },
+            )
 
     def _ensure_image_auth_support(self, request: CreateSandboxRequest) -> None:
         """
