@@ -20,6 +20,7 @@ import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolatedSessionRequest
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import kotlinx.serialization.json.Json
@@ -155,6 +156,16 @@ class IsolatedSessionsAdapterTest {
         assertEquals("/v1/isolated/capabilities", mockWebServer.takeRequest().path)
         assertEquals(false, capabilities.setprivAvailable)
         assertEquals(true, capabilities.usernsAvailable)
+    }
+
+    @Test
+    fun `capabilities preserves existing positional constructor order`() {
+        val capabilities = IsolatedCapabilities(true, null, null, null, true, true)
+
+        assertEquals(true, capabilities.commitSupported)
+        assertEquals(true, capabilities.diffSupported)
+        assertEquals(false, capabilities.setprivAvailable)
+        assertEquals(false, capabilities.usernsAvailable)
     }
 
     @Test

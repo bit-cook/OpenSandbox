@@ -71,7 +71,9 @@ At startup, execd probes both modes independently. `GET
 /v1/isolated/capabilities` reports `setpriv_available` and
 `userns_available`; the overall `available` field is true when either mode is
 usable. Creating a session returns `503 NOT_SUPPORTED` only when the selected
-mode is unavailable.
+mode is unavailable. The probes exercise the same identity path used at
+runtime: `setpriv` performs a real UID/GID drop, while `userns` applies the
+UID/GID mapping and the setuid-aware `--disable-userns` policy.
 
 ### Bind mounts
 

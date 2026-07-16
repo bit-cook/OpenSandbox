@@ -76,6 +76,10 @@ func isSetuidBinary(path string) bool {
 	return fi.Mode()&os.ModeSetuid != 0
 }
 
+func currentProcessIDs() (uint32, uint32) {
+	return uint32(os.Getuid()), uint32(os.Getgid())
+}
+
 // bwrapImpl is the Linux bwrap Isolator.
 type bwrapImpl struct {
 	probe ProbeResult

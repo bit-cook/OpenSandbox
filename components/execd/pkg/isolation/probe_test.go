@@ -99,14 +99,36 @@ func TestSetBwrapModeAvailability(t *testing.T) {
 	}
 }
 
-func TestBwrapSmokeArgs_UsernsFlag(t *testing.T) {
-	setprivArgs := bwrapSmokeArgs(false)
+func TestSetprivSmokeTargetIDs(t *testing.T) {
+	uid, gid := setprivSmokeTargetIDs(65534, 65534)
+	if uid == 0 || uid == 65534 || gid == 0 || gid == 65534 {
+		t.Fatalf("targets = (%d, %d), want non-zero IDs different from current", uid, gid)
+	}
+}
+
+func TestBwrapSmokeArgs(t *testing.T) {
+	setprivArgs := bwrapSmokeArgs(UidModeSetpriv, false, 65534, 65533)
 	if slices.Contains(setprivArgs, "--unshare-user") {
 		t.Errorf("setpriv smoke args unexpectedly contain --unshare-user: %v", setprivArgs)
 	}
+	for _, want := range []string{"setpriv", "--reuid=65534", "--regid=65533", "--clear-groups"} {
+		if !slices.Contains(setprivArgs, want) {
+			t.Errorf("setpriv smoke args do not contain %q: %v", want, setprivArgs)
+		}
+	}
 
-	usernsArgs := bwrapSmokeArgs(true)
-	if !slices.Contains(usernsArgs, "--unshare-user") {
-		t.Errorf("userns smoke args do not contain --unshare-user: %v", usernsArgs)
+	usernsArgs := bwrapSmokeArgs(UidModeUserns, false, 1000, 1001)
+	for _, want := range []string{"--unshare-user", "--disable-userns", "--uid", "1000", "--gid", "1001"} {
+		if !slices.Contains(usernsArgs, want) {
+			t.Errorf("userns smoke args do not contain %q: %v", want, usernsArgs)
+		}
+	}
+	if slices.Contains(usernsArgs, "setpriv") {
+		t.Errorf("userns smoke args unexpectedly contain setpriv: %v", usernsArgs)
+	}
+
+	setuidUsernsArgs := bwrapSmokeArgs(UidModeUserns, true, 1000, 1001)
+	if slices.Contains(setuidUsernsArgs, "--disable-userns") {
+		t.Errorf("setuid bwrap smoke args unexpectedly contain --disable-userns: %v", setuidUsernsArgs)
 	}
 }

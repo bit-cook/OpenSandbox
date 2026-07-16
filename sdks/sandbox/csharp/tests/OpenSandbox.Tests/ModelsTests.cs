@@ -42,6 +42,17 @@ public class ModelsTests
     }
 
     [Fact]
+    public void IsolatedCapabilities_ShouldPreserveExistingPositionalArguments()
+    {
+        var capabilities = new IsolatedCapabilities(true, null, null, null, true, true);
+
+        capabilities.CommitSupported.Should().BeTrue();
+        capabilities.DiffSupported.Should().BeTrue();
+        capabilities.SetprivAvailable.Should().BeFalse();
+        capabilities.UsernsAvailable.Should().BeFalse();
+    }
+
+    [Fact]
     public void Execution_ShouldInitializeWithEmptyCollections()
     {
         // Arrange & Act

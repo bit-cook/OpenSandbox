@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
@@ -136,43 +137,84 @@ func parseBwrapVersion(out string) string {
 	return match[1]
 }
 
-// probeBwrapSetprivSmoke verifies bwrap can create the namespaces used by the
-// default setpriv uid mode.
+// probeBwrapSetprivSmoke verifies bwrap can create the namespaces and perform
+// the identity switch used by the default setpriv uid mode.
 func probeBwrapSetprivSmoke() error {
-	return probeBwrapSmoke(false)
+	return probeBwrapSmoke(UidModeSetpriv)
 }
 
-// probeBwrapUsernsSmoke verifies bwrap can create the namespaces used by the
-// userns uid mode.
+// probeBwrapUsernsSmoke verifies bwrap can create the user namespace and apply
+// the uid/gid mapping used by the userns uid mode.
 func probeBwrapUsernsSmoke() error {
-	return probeBwrapSmoke(true)
+	return probeBwrapSmoke(UidModeUserns)
 }
 
-func probeBwrapSmoke(userns bool) error {
+func probeBwrapSmoke(mode UidMode) error {
 	p := findBwrap()
 	if p == "" {
 		return fmt.Errorf("bwrap not found")
 	}
-	cmd := exec.Command(p, bwrapSmokeArgs(userns)...)
+
+	uid, gid := currentProcessIDs()
+	if mode == UidModeSetpriv {
+		uid, gid = setprivSmokeTargetIDs(uid, gid)
+	}
+	cmd := exec.Command(p, bwrapSmokeArgs(mode, isSetuidBinary(p), uid, gid)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("bwrap smoke test failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("bwrap %s smoke test failed: %w (stderr: %s)", mode, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
 
-func bwrapSmokeArgs(userns bool) []string {
-	args := []string{
+// setprivSmokeTargetIDs returns non-zero IDs different from the process IDs.
+// That makes the smoke test exercise the CAP_SETUID/CAP_SETGID path required
+// for arbitrary uid/gid requests instead of merely re-applying the current
+// identity, which can succeed without those capabilities.
+func setprivSmokeTargetIDs(currentUID, currentGID uint32) (uint32, uint32) {
+	const unprivilegedID uint32 = 65534
+	targetUID, targetGID := unprivilegedID, unprivilegedID
+	if currentUID == targetUID {
+		targetUID--
+	}
+	if currentGID == targetGID {
+		targetGID--
+	}
+	return targetUID, targetGID
+}
+
+func bwrapSmokeArgs(mode UidMode, setuidBwrap bool, uid, gid uint32) []string {
+	var args []string
+	if mode == UidModeUserns {
+		args = append(args, "--unshare-user")
+		if !setuidBwrap {
+			args = append(args, "--disable-userns")
+		}
+	}
+	args = append(args,
 		"--unshare-pid", "--unshare-uts", "--unshare-ipc", "--unshare-cgroup",
+	)
+	if mode == UidModeUserns {
+		args = append(args,
+			"--uid", strconv.FormatUint(uint64(uid), 10),
+			"--gid", strconv.FormatUint(uint64(gid), 10),
+		)
+	}
+	args = append(args,
 		"--ro-bind", "/", "/",
 		"--proc", "/proc",
-		"--", "true",
+		"--",
+	)
+	if mode == UidModeSetpriv {
+		args = append(args,
+			"setpriv",
+			fmt.Sprintf("--reuid=%d", uid),
+			fmt.Sprintf("--regid=%d", gid),
+			"--clear-groups",
+		)
 	}
-	if userns {
-		args = append([]string{"--unshare-user"}, args...)
-	}
-	return args
+	return append(args, "true")
 }
 
 // probeOverlayMount tests whether bwrap can create an overlay mount.
