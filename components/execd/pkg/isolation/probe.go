@@ -33,11 +33,15 @@ type ProbeResult struct {
 	Isolator         string
 	Version          string
 	Message          string // diagnostic message when unavailable
-	SetprivAvailable bool   // setpriv uid mode can create the required namespaces
-	UsernsAvailable  bool   // userns uid mode can create the required namespaces
-	CommitSupported  bool   // Phase 2
-	DiffSupported    bool   // Phase 2
-	PersistAvailable bool   // Phase 2 — requires emptyDir
+	SetprivAvailable bool   // default setpriv uid mode can create the required namespaces
+	// SetprivSwitchAvailable is an internal preflight capability for
+	// requests that choose IDs different from the execd process IDs. The public
+	// setpriv_available flag intentionally describes the default identity path.
+	SetprivSwitchAvailable bool
+	UsernsAvailable        bool // userns uid mode can create the required namespaces
+	CommitSupported        bool // Phase 2
+	DiffSupported          bool // Phase 2
+	PersistAvailable       bool // Phase 2 — requires emptyDir
 }
 
 // ProbeConfig controls Probe behaviour.
@@ -75,10 +79,16 @@ func Probe(cfg ProbeConfig) ProbeResult {
 	// by setpriv mode (or vice versa), so one failing mode must not disable the
 	// other.
 	setprivErr := probeBwrapSetprivSmoke()
+	setprivIdentitySwitchErr := setprivErr
+	if setprivErr == nil {
+		setprivIdentitySwitchErr = probeBwrapSetprivIdentitySwitchSmoke()
+	}
 	usernsErr := probeBwrapUsernsSmoke()
-	setBwrapModeAvailability(&result, setprivErr, usernsErr)
+	setBwrapModeAvailability(&result, setprivErr, setprivIdentitySwitchErr, usernsErr)
 	if setprivErr != nil {
 		log.Warn("isolation probe: setpriv uid mode unavailable: %v", setprivErr)
+	} else if setprivIdentitySwitchErr != nil {
+		log.Warn("isolation probe: setpriv uid mode cannot switch to arbitrary uid/gid: %v", setprivIdentitySwitchErr)
 	}
 	if usernsErr != nil {
 		log.Warn("isolation probe: userns uid mode unavailable: %v", usernsErr)
@@ -100,8 +110,9 @@ func Probe(cfg ProbeConfig) ProbeResult {
 	return result
 }
 
-func setBwrapModeAvailability(result *ProbeResult, setprivErr, usernsErr error) {
+func setBwrapModeAvailability(result *ProbeResult, setprivErr, setprivIdentitySwitchErr, usernsErr error) {
 	result.SetprivAvailable = setprivErr == nil
+	result.SetprivSwitchAvailable = setprivErr == nil && setprivIdentitySwitchErr == nil
 	result.UsernsAvailable = usernsErr == nil
 	result.Available = result.SetprivAvailable || result.UsernsAvailable
 }
@@ -137,28 +148,37 @@ func parseBwrapVersion(out string) string {
 	return match[1]
 }
 
-// probeBwrapSetprivSmoke verifies bwrap can create the namespaces and perform
-// the identity switch used by the default setpriv uid mode.
+// probeBwrapSetprivSmoke verifies the exact default setpriv path. A root execd
+// with omitted uid/gid does not invoke setpriv, while a non-root execd invokes
+// setpriv with its current IDs.
 func probeBwrapSetprivSmoke() error {
-	return probeBwrapSmoke(UidModeSetpriv)
+	uid, gid := currentProcessIDs()
+	return probeBwrapSmoke(UidModeSetpriv, uid, gid)
+}
+
+// probeBwrapSetprivIdentitySwitchSmoke verifies that setpriv can switch to IDs
+// different from execd's own. Runtime uses this result only for requests that
+// explicitly require such a switch, so a default root session is not rejected
+// merely because a minimal image omits setpriv.
+func probeBwrapSetprivIdentitySwitchSmoke() error {
+	uid, gid := currentProcessIDs()
+	uid, gid = setprivSmokeTargetIDs(uid, gid)
+	return probeBwrapSmoke(UidModeSetpriv, uid, gid)
 }
 
 // probeBwrapUsernsSmoke verifies bwrap can create the user namespace and apply
 // the uid/gid mapping used by the userns uid mode.
 func probeBwrapUsernsSmoke() error {
-	return probeBwrapSmoke(UidModeUserns)
+	uid, gid := currentProcessIDs()
+	return probeBwrapSmoke(UidModeUserns, uid, gid)
 }
 
-func probeBwrapSmoke(mode UidMode) error {
+func probeBwrapSmoke(mode UidMode, uid, gid uint32) error {
 	p := findBwrap()
 	if p == "" {
 		return fmt.Errorf("bwrap not found")
 	}
 
-	uid, gid := currentProcessIDs()
-	if mode == UidModeSetpriv {
-		uid, gid = setprivSmokeTargetIDs(uid, gid)
-	}
 	cmd := exec.Command(p, bwrapSmokeArgs(mode, isSetuidBinary(p), uid, gid)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -206,7 +226,9 @@ func bwrapSmokeArgs(mode UidMode, setuidBwrap bool, uid, gid uint32) []string {
 		"--proc", "/proc",
 		"--",
 	)
-	if mode == UidModeSetpriv {
+	// Match buildArgv: root sessions that keep uid/gid 0 do not invoke
+	// setpriv, while any non-zero effective ID uses the identity helper.
+	if mode == UidModeSetpriv && (uid != 0 || gid != 0) {
 		args = append(args,
 			"setpriv",
 			fmt.Sprintf("--reuid=%d", uid),

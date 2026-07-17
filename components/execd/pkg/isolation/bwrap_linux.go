@@ -122,6 +122,7 @@ func (b *bwrapImpl) Capabilities() Capabilities {
 		Isolator:               b.probe.Isolator,
 		Version:                b.probe.Version,
 		SetprivAvailable:       b.probe.SetprivAvailable,
+		SetprivSwitchAvailable: b.probe.SetprivSwitchAvailable,
 		UsernsAvailable:        b.probe.UsernsAvailable,
 		Profiles:               []Profile{ProfileStrict, ProfileBalanced},
 		ShareNetOverridable:    true,

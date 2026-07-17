@@ -61,7 +61,7 @@ func TestProbeResult_Defaults(t *testing.T) {
 	if result.DiffSupported {
 		t.Error("default ProbeResult should have DiffSupported=false")
 	}
-	if result.SetprivAvailable || result.UsernsAvailable {
+	if result.SetprivAvailable || result.SetprivSwitchAvailable || result.UsernsAvailable {
 		t.Error("default ProbeResult should have both uid modes unavailable")
 	}
 }
@@ -71,13 +71,16 @@ func TestSetBwrapModeAvailability(t *testing.T) {
 	tests := []struct {
 		name          string
 		setprivErr    error
+		identityErr   error
 		usernsErr     error
 		wantAvailable bool
 		wantSetpriv   bool
+		wantIdentity  bool
 		wantUserns    bool
 	}{
-		{name: "both available", wantAvailable: true, wantSetpriv: true, wantUserns: true},
-		{name: "setpriv only", usernsErr: probeErr, wantAvailable: true, wantSetpriv: true},
+		{name: "both available", wantAvailable: true, wantSetpriv: true, wantIdentity: true, wantUserns: true},
+		{name: "setpriv only", usernsErr: probeErr, wantAvailable: true, wantSetpriv: true, wantIdentity: true},
+		{name: "setpriv default only", identityErr: probeErr, usernsErr: probeErr, wantAvailable: true, wantSetpriv: true},
 		{name: "userns only", setprivErr: probeErr, wantAvailable: true, wantUserns: true},
 		{name: "neither available", setprivErr: probeErr, usernsErr: probeErr},
 	}
@@ -85,12 +88,15 @@ func TestSetBwrapModeAvailability(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ProbeResult{}
-			setBwrapModeAvailability(&result, tt.setprivErr, tt.usernsErr)
+			setBwrapModeAvailability(&result, tt.setprivErr, tt.identityErr, tt.usernsErr)
 			if result.Available != tt.wantAvailable {
 				t.Errorf("Available = %v, want %v", result.Available, tt.wantAvailable)
 			}
 			if result.SetprivAvailable != tt.wantSetpriv {
 				t.Errorf("SetprivAvailable = %v, want %v", result.SetprivAvailable, tt.wantSetpriv)
+			}
+			if result.SetprivSwitchAvailable != tt.wantIdentity {
+				t.Errorf("SetprivSwitchAvailable = %v, want %v", result.SetprivSwitchAvailable, tt.wantIdentity)
 			}
 			if result.UsernsAvailable != tt.wantUserns {
 				t.Errorf("UsernsAvailable = %v, want %v", result.UsernsAvailable, tt.wantUserns)
@@ -107,6 +113,11 @@ func TestSetprivSmokeTargetIDs(t *testing.T) {
 }
 
 func TestBwrapSmokeArgs(t *testing.T) {
+	rootSetprivArgs := bwrapSmokeArgs(UidModeSetpriv, false, 0, 0)
+	if slices.Contains(rootSetprivArgs, "setpriv") {
+		t.Errorf("root setpriv smoke args unexpectedly contain setpriv: %v", rootSetprivArgs)
+	}
+
 	setprivArgs := bwrapSmokeArgs(UidModeSetpriv, false, 65534, 65533)
 	if slices.Contains(setprivArgs, "--unshare-user") {
 		t.Errorf("setpriv smoke args unexpectedly contain --unshare-user: %v", setprivArgs)
