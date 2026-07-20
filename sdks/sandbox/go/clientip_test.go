@@ -80,7 +80,7 @@ func TestSelectClientIP_PrefersNamedNICAndSkipsVirtual(t *testing.T) {
 	nics := []nicAddrs{
 		{name: "docker0", ips: []net.IP{net.ParseIP("172.17.0.1")}}, // virtual, skip
 		{name: "utun3", ips: []net.IP{net.ParseIP("10.8.0.3")}},     // VPN, skip
-		{name: "en0", ips: []net.IP{net.ParseIP("10.1.1.1")}},   // main NIC
+		{name: "en0", ips: []net.IP{net.ParseIP("10.1.1.1")}},       // main NIC
 		{name: "eth1", ips: []net.IP{net.ParseIP("192.168.5.5")}},
 	}
 	require.Equal(t, "10.1.1.1", selectClientIP(nics))
