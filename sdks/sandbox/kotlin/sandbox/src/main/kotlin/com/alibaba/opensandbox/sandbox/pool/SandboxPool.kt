@@ -300,11 +300,13 @@ class SandboxPool internal constructor(
                         e.message,
                     )
                     stateStore.removeIdle(poolName, sandboxId)
-                    try {
-                        sandboxManager?.killSandbox(sandboxId)
-                    } catch (_: Exception) {
-                        // best-effort kill; do not replace original error
-                    }
+                    // Fire-and-forget the remote kill on the warmup executor. Awaiting kill
+                    // inline would let a slow DELETE (up to the lifecycle client's request
+                    // timeout) block the next retry iteration, defeating the point of
+                    // RETRY_NEXT_IDLE. scheduleKillDiscardedAlive uses the same executor path
+                    // as discarded-alive cleanup and falls back to inline execution when the
+                    // pool is mid-shutdown so cleanup is never silently dropped.
+                    scheduleKillDiscardedAlive(poolName, listOf(sandboxId), source = "acquire-stale")
                     // Re-check lifecycle between iterations so an in-flight shutdown / namespace
                     // destroy short-circuits the retry loop instead of paying another readyTimeout.
                     if (lifecycleState.get() != LifecycleState.RUNNING) {

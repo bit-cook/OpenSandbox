@@ -121,7 +121,9 @@ def test_acquire_fail_fast_stale_idle_raises_and_kills_candidate() -> None:
             pool.acquire(policy=AcquirePolicy.FAIL_FAST)
         assert exc.value.error.code == "POOL_ACQUIRE_FAILED"
         assert store.snapshot_counters("pool").idle_count == 0
-        assert manager.killed == ["stale-1"]
+        # Kill is now fire-and-forget on the warmup executor (retry loop must not block on
+        # slow DELETEs) so poll briefly for the background task to observe the kill.
+        _eventually(lambda: manager.killed == ["stale-1"])
     finally:
         pool.shutdown(False)
 
@@ -542,8 +544,9 @@ def test_acquire_retry_next_idle_all_stale_bounds_retries_and_raises() -> None:
         with pytest.raises(PoolAcquireFailedException):
             pool.acquire(policy=AcquirePolicy.RETRY_NEXT_IDLE)
         assert store.snapshot_counters("pool").idle_count == 2
-        # Best-effort kill fires once per attempted stale id.
-        assert sorted(manager.killed) == ["stale-0", "stale-1", "stale-2"]
+        # Best-effort kill fires once per attempted stale id, fire-and-forget on the warmup
+        # executor. Poll for the background tasks to observe all three.
+        _eventually(lambda: sorted(manager.killed) == ["stale-0", "stale-1", "stale-2"])
     finally:
         pool.shutdown(False)
 
@@ -665,6 +668,44 @@ def test_acquire_retry_next_idle_renew_failure_kills_remote_without_retrying() -
             "otherwise the sandbox leaks alive-but-untracked until server-side TTL expiry"
         )
         assert connected[0].closed
+    finally:
+        pool.shutdown(False)
+
+
+def test_acquire_retry_next_idle_does_not_block_on_slow_stale_kill() -> None:
+    """Regression: stale-candidate kill must fire-and-forget on the warmup executor so a
+    slow lifecycle-API DELETE does not stall the retry loop between candidates. Verify by
+    injecting a manager whose kill_sandbox blocks for longer than would be tolerable in
+    the retry path, then asserting acquire returns quickly with the healthy candidate.
+    """
+    slow_kill_seconds = 2.0
+
+    class SlowKillManager(FakeManager):
+        def kill_sandbox(self, sandbox_id: str) -> None:
+            time.sleep(slow_kill_seconds)
+            super().kill_sandbox(sandbox_id)
+
+    store = InMemoryPoolStateStore()
+    # Two stale ids ahead of a healthy id; a blocking kill on stale would add 2 * 2s = 4s
+    # to acquire latency if kill were awaited inline.
+    store.put_idle("pool", "stale-a")
+    store.put_idle("pool", "stale-b")
+    store.put_idle("pool", "healthy-x")
+
+    manager = SlowKillManager()
+    pool = _create_pool(max_idle=0, store=store, manager=manager, max_acquire_retries=5)
+    pool.start()
+    try:
+        start = time.monotonic()
+        sandbox = pool.acquire(policy=AcquirePolicy.RETRY_NEXT_IDLE)
+        elapsed = time.monotonic() - start
+        assert sandbox.id == "healthy-x"
+        # Generous bound but well below the 2 * slow_kill_seconds a naive inline-kill loop
+        # would take (and far below the 30s lifecycle default request_timeout).
+        assert elapsed < slow_kill_seconds, (
+            f"acquire took {elapsed:.2f}s; expected retry loop to not block on the "
+            f"slow stale kill (each blocks {slow_kill_seconds:.2f}s)"
+        )
     finally:
         pool.shutdown(False)
 

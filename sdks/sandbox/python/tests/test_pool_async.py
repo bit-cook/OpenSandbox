@@ -100,7 +100,12 @@ async def test_async_acquire_fail_fast_stale_idle_raises_and_kills_candidate() -
             await pool.acquire(policy=AcquirePolicy.FAIL_FAST)
         assert exc.value.error.code == "POOL_ACQUIRE_FAILED"
         assert (await store.snapshot_counters("pool")).idle_count == 0
-        assert manager.killed == ["stale-1"]
+        # Kill is now fire-and-forget (retry-loop must not block on slow DELETE) so wait for
+        # the background task to observe the kill.
+        async def _killed_stale_1() -> bool:
+            return manager.killed == ["stale-1"]
+
+        await _eventually(_killed_stale_1)
     finally:
         await pool.shutdown(False)
 
@@ -543,7 +548,13 @@ async def test_async_acquire_retry_next_idle_all_stale_bounds_retries_and_raises
             await pool.acquire(policy=AcquirePolicy.RETRY_NEXT_IDLE)
         counters = await store.snapshot_counters("pool")
         assert counters.idle_count == 2
-        assert sorted(manager.killed) == ["stale-0", "stale-1", "stale-2"]
+
+        # Kills for stale candidates are fire-and-forget (Codex review: retry loop must not
+        # block on slow DELETEs). Wait for the background tasks to observe all three.
+        async def _killed_three() -> bool:
+            return sorted(manager.killed) == ["stale-0", "stale-1", "stale-2"]
+
+        await _eventually(_killed_three)
     finally:
         await pool.shutdown(False)
 
@@ -668,6 +679,40 @@ async def test_async_acquire_retry_next_idle_renew_failure_kills_remote_without_
             "otherwise the sandbox leaks alive-but-untracked until server-side TTL expiry"
         )
         assert connected[0].closed
+    finally:
+        await pool.shutdown(False)
+
+
+async def test_async_acquire_retry_next_idle_does_not_block_on_slow_stale_kill() -> None:
+    """Async counterpart of the sync slow-kill regression: stale-candidate kill must be
+    scheduled as a background task so a slow DELETE does not stall the retry loop.
+    """
+    slow_kill_seconds = 2.0
+
+    class SlowKillManager(FakeAsyncManager):
+        async def kill_sandbox(self, sandbox_id: str) -> None:
+            await asyncio.sleep(slow_kill_seconds)
+            await super().kill_sandbox(sandbox_id)
+
+    store = InMemoryAsyncPoolStateStore()
+    await store.put_idle("pool", "stale-a")
+    await store.put_idle("pool", "stale-b")
+    await store.put_idle("pool", "healthy-x")
+
+    manager = SlowKillManager()
+    pool = _create_pool(
+        max_idle=0, store=store, manager=manager, max_acquire_retries=5
+    )
+    await pool.start()
+    try:
+        start = time.monotonic()
+        sandbox = await pool.acquire(policy=AcquirePolicy.RETRY_NEXT_IDLE)
+        elapsed = time.monotonic() - start
+        assert sandbox.id == "healthy-x"
+        assert elapsed < slow_kill_seconds, (
+            f"acquire took {elapsed:.2f}s; expected retry loop to not block on the "
+            f"slow stale kill (each blocks {slow_kill_seconds:.2f}s)"
+        )
     finally:
         await pool.shutdown(False)
 

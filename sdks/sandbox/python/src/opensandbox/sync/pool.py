@@ -262,14 +262,14 @@ class SandboxPoolSync:
                     raise
                 except Exception as exc:
                     # Connect / readiness / health-check failure — the idle candidate itself
-                    # is unusable. Remove it, best-effort kill, then let the loop try the next.
+                    # is unusable. Remove it, fire-and-forget the remote kill on the warmup
+                    # executor so a slow DELETE (up to the lifecycle client's request_timeout,
+                    # 30s by default) does not block the next retry iteration.
                     last_idle_connect_failure = exc
                     self._state_store.remove_idle(pool_name, sandbox_id)
-                    try:
-                        if self._sandbox_manager is not None:
-                            self._sandbox_manager.kill_sandbox(sandbox_id)
-                    except Exception:
-                        pass
+                    self._schedule_kill_discarded_alive(
+                        pool_name, (sandbox_id,), source="acquire-stale"
+                    )
                     if self._lifecycle_state != PoolLifecycleState.RUNNING:
                         state = self._lifecycle_state
                         self._raise_if_pool_namespace_destroyed()
