@@ -71,6 +71,9 @@ server:
     dataplaneNamespace: "opensandbox"
     providerType: "batchsandbox"
     logLevel: "info"
+    # -- Additional environment variables for the ingress-gateway container
+    # (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics).
+    env: []
     resources:
       limits:
         cpu: "2"
@@ -100,6 +103,10 @@ server:
     priorityClassName: ""
     # -- Topology spread constraints for the ingress gateway pod.
     topologySpreadConstraints: []
+    # -- Tolerations for the ingress gateway pod.
+    tolerations: []
+    # -- Affinity for the ingress gateway pod.
+    affinity: {}
 
 # -- Server config (TOML). Mounted at /etc/opensandbox/config.toml.
 configToml: |

@@ -92,6 +92,14 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.server.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: main
           image: {{ include "opensandbox-server.ingressGatewayImage" . }}
@@ -113,6 +121,10 @@ spec:
             - name: http
               containerPort: {{ .Values.server.gateway.port }}
               protocol: TCP
+          {{- with .Values.server.gateway.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /status.ok
