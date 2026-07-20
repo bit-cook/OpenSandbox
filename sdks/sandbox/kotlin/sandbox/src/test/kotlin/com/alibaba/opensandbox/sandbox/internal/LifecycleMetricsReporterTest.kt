@@ -1,0 +1,156 @@
+/*
+ * Copyright 2026 Alibaba Group Holding Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.opensandbox.sandbox.internal
+
+import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import java.time.Duration
+import java.util.concurrent.TimeUnit
+
+class LifecycleMetricsReporterTest {
+    private lateinit var server: MockWebServer
+
+    @BeforeEach
+    fun setUp() {
+        server = MockWebServer()
+        server.start()
+    }
+
+    @AfterEach
+    fun tearDown() {
+        try {
+            server.shutdown()
+        } catch (_: Exception) {
+            // Some tests shut the server down early; ignore double-shutdown.
+        }
+    }
+
+    @Test
+    fun `build payload omits optional fields when null or blank`() {
+        val payload = LifecycleMetricsReporter.buildPayload(null, "  ", createDurationMs = 12L, success = false)
+        val obj = Json.parseToJsonElement(payload)
+        val map = obj.toString()
+        assertTrue(map.contains("\"eventType\":\"sandbox.create\""))
+        assertTrue(map.contains("\"createDurationMs\":12"))
+        assertTrue(map.contains("\"success\":false"))
+        assertFalse(map.contains("sandboxId"))
+        assertFalse(map.contains("image"))
+    }
+
+    @Test
+    fun `build payload clamps negative duration to zero`() {
+        val payload = LifecycleMetricsReporter.buildPayload("sbx-1", "python:3.12", createDurationMs = -42L, success = true)
+        assertTrue(payload.contains("\"createDurationMs\":0"))
+        assertTrue(payload.contains("\"sandboxId\":\"sbx-1\""))
+        assertTrue(payload.contains("\"image\":\"python:3.12\""))
+    }
+
+    @Test
+    fun `does not post when disableMetrics flag is set`() {
+        server.enqueue(MockResponse().setResponseCode(204))
+        val config =
+            ConnectionConfig.builder()
+                .domain(server.hostName + ":" + server.port)
+                .protocol("http")
+                .disableMetrics(true)
+                .build()
+
+        LifecycleMetricsReporter.reportSandboxCreate(
+            connectionConfig = config,
+            sandboxId = "sbx",
+            image = "python:3.12",
+            createDurationMs = 10L,
+            success = true,
+        )
+
+        // Give the client a short window; MockWebServer.takeRequest returns null on timeout.
+        val recorded = server.takeRequest(300, TimeUnit.MILLISECONDS)
+        assertNull(recorded, "metrics must not be posted when disableMetrics=true")
+    }
+
+    @Test
+    fun `posts expected payload and headers on success path`() {
+        server.enqueue(MockResponse().setResponseCode(204))
+        val config =
+            ConnectionConfig.builder()
+                .domain(server.hostName + ":" + server.port)
+                .protocol("http")
+                .apiKey("test-key")
+                .requestTimeout(Duration.ofSeconds(5))
+                .build()
+
+        LifecycleMetricsReporter.reportSandboxCreate(
+            connectionConfig = config,
+            sandboxId = "sbx",
+            image = "python:3.12",
+            createDurationMs = 42L,
+            success = true,
+        )
+
+        val recorded = server.takeRequest(3, TimeUnit.SECONDS)
+        assertNotNull(recorded, "metrics POST should be sent")
+        assertEquals("POST", recorded!!.method)
+        assertEquals("/v1/metrics/events", recorded.path)
+        assertEquals("test-key", recorded.getHeader("OPEN-SANDBOX-API-KEY"))
+        assertTrue(recorded.getHeader("User-Agent")!!.startsWith("OpenSandbox-Kotlin-SDK/"))
+
+        val body = Json.parseToJsonElement(recorded.body.readUtf8())
+        val obj = body.toString()
+        assertTrue(obj.contains("\"eventType\":\"sandbox.create\""))
+        assertTrue(obj.contains("\"createDurationMs\":42"))
+        assertTrue(obj.contains("\"success\":true"))
+        assertTrue(obj.contains("\"sandboxId\":\"sbx\""))
+        assertTrue(obj.contains("\"image\":\"python:3.12\""))
+        // Sanity: the JSON is parseable and contains the expected shape.
+        assertEquals(
+            "sandbox.create",
+            (body as kotlinx.serialization.json.JsonObject)["eventType"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `report never throws when server is unreachable`() {
+        // Use a shut-down server so the connection immediately fails.
+        server.shutdown()
+        val config =
+            ConnectionConfig.builder()
+                .domain("127.0.0.1:1")
+                .protocol("http")
+                .requestTimeout(Duration.ofMillis(200))
+                .build()
+
+        // Should not throw or hang.
+        LifecycleMetricsReporter.reportSandboxCreate(
+            connectionConfig = config,
+            sandboxId = null,
+            image = "img",
+            createDurationMs = 1L,
+            success = false,
+        )
+    }
+}
