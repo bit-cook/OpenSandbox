@@ -123,6 +123,7 @@ func TestParseExportLine_BashAndShFormats(t *testing.T) {
 		{name: "sh", line: `export FOO='hello world'`, wantName: "FOO", wantValue: "hello world", wantOK: true},
 		{name: "sh escaped quote", line: `export FOO='it'\''s'`, wantName: "FOO", wantValue: "it's", wantOK: true},
 		{name: "empty", line: `export FOO=""`, wantName: "FOO", wantValue: "", wantOK: true},
+		{name: "lone quote", line: `export FOO='`, wantName: "FOO", wantValue: "'", wantOK: true},
 	}
 
 	for _, tt := range tests {

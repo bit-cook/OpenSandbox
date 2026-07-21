@@ -223,8 +223,8 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
-		log.Error("start shell session failed: %v (command: %q)", err, log.SanitizeCommand(request.Code))
-		return fmt.Errorf("start shell: %w", err)
+		log.Error("start %s session failed: %v (command: %q)", shell, err, log.SanitizeCommand(request.Code))
+		return fmt.Errorf("start %s: %w", shell, err)
 	}
 	defer s.untrackCurrentProcess()
 	s.trackCurrentProcess(cmd.Process.Pid)
@@ -410,7 +410,7 @@ func parseExportLine(line string) (string, string, bool) {
 		raw := rest[eq+1:]
 		if unquoted, err := strconv.Unquote(raw); err == nil {
 			value = unquoted
-		} else if strings.HasPrefix(raw, "'") && strings.HasSuffix(raw, "'") {
+		} else if len(raw) >= 2 && strings.HasPrefix(raw, "'") && strings.HasSuffix(raw, "'") {
 			// POSIX shells commonly emit single-quoted values and represent an
 			// embedded quote by ending the quote, escaping it, and reopening it.
 			value = strings.ReplaceAll(raw[1:len(raw)-1], `'\''`, `'`)

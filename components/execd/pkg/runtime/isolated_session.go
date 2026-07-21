@@ -145,7 +145,7 @@ func (s *isolatedSession) start() error {
 		for _, f := range cmd.ExtraFiles {
 			f.Close()
 		}
-		return err
+		return fmt.Errorf("start %s: %w", shell, err)
 	}
 
 	for _, f := range cmd.ExtraFiles {
