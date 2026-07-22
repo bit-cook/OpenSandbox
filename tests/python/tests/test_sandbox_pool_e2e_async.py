@@ -272,6 +272,17 @@ class TestSandboxPoolSingleNodeE2EAsync:
                 ),
             )
 
+            # Assert the stale id is at the HEAD of the FIFO idle queue. If a future
+            # store implementation ever reordered on put_idle, or if the reconciler
+            # somehow reaped the stale before warmup landed, we want to catch it here
+            # instead of silently taking the "healthy first" happy path and calling it
+            # RETRY coverage.
+            entries_before = await mixed_store.snapshot_idle_entries(mixed_pool_name)
+            assert len(entries_before) == 2
+            assert entries_before[0].sandbox_id == stale_id, (
+                f"expected stale id at idle head, got queue={[e.sandbox_id for e in entries_before]}"
+            )
+
             sandbox = await mixed_pool.acquire(
                 timedelta(minutes=5), AcquirePolicy.RETRY_NEXT_IDLE
             )
@@ -307,6 +318,11 @@ class TestSandboxPoolSingleNodeE2EAsync:
         all_stale_tag = _tag("py-async-retry-then-create-all-stale")
         all_stale_store = InMemoryAsyncPoolStateStore()
         all_stale_pool_name = f"retry-then-create-{self.pool_name}"
+        # Long reconcile_interval so the reconciler cannot race the acquire loop and
+        # shrink stale entries out from under the RETRY_NEXT_IDLE_THEN_CREATE path.
+        # We need the loop to actually exhaust max_acquire_retries on stale connect
+        # failures (loop_exhausted=True) before falling through, not to short-circuit
+        # via "idle buffer drained mid-loop".
         all_stale_pool = _create_pool(
             pool_name=all_stale_pool_name,
             owner_id=f"retry-then-create-owner-{self.tag}",
@@ -315,6 +331,7 @@ class TestSandboxPoolSingleNodeE2EAsync:
             max_idle=0,
             max_acquire_retries=3,
             acquire_ready_timeout=timedelta(seconds=3),
+            reconcile_interval=timedelta(minutes=5),
         )
         try:
             await all_stale_pool.start()
@@ -334,11 +351,16 @@ class TestSandboxPoolSingleNodeE2EAsync:
             assert result.error is None
             assert result.logs.stdout[0].text == "py-async-retry-then-create-ok"
 
-            await _eventually(
-                "async retry-then-create drains stale idle entries",
-                lambda: _snapshot_matches(
-                    all_stale_pool, lambda snap: snap.idle_count == 0
-                ),
+            # Under the long reconcile_interval configured on this pool, only the acquire
+            # retry loop can pop entries from the idle queue. If the retry loop truly
+            # exhausted all 3 stale candidates before falling through to direct-create,
+            # all 3 stale ids must have been removed. If it short-circuited earlier
+            # (e.g. after a single attempt due to some race), some stale ids would
+            # remain in the queue and this assertion catches the regression.
+            remaining = await all_stale_store.snapshot_idle_entries(all_stale_pool_name)
+            remaining_ids = {entry.sandbox_id for entry in remaining}
+            assert not (set(stale_ids) & remaining_ids), (
+                f"retry loop did not fully exhaust stale queue; remaining={remaining_ids}"
             )
         finally:
             await _cleanup_pool(all_stale_pool)
@@ -364,6 +386,10 @@ class TestSandboxPoolSingleNodeE2EAsync:
             max_idle=0,
             max_acquire_retries=2,
             acquire_ready_timeout=timedelta(seconds=3),
+            # Long reconcile_interval: prevent the reconciler from shrinking stale ids
+            # before the acquire loop can pop them. We need to prove the bound stops the
+            # loop after exactly 2 stale attempts, not that the queue happened to drain.
+            reconcile_interval=timedelta(minutes=5),
         )
         try:
             await raise_pool.start()
@@ -908,6 +934,7 @@ def _create_pool(
     acquire_ready_timeout: timedelta = timedelta(seconds=30),
     warmup_concurrency: int = 1,
     max_acquire_retries: int = 3,
+    reconcile_interval: timedelta = RECONCILE_INTERVAL,
 ) -> SandboxPoolAsync:
     return SandboxPoolAsync(
         pool_name=pool_name,
@@ -927,7 +954,7 @@ def _create_pool(
             },
             resource=get_e2e_sandbox_resource(),
         ),
-        reconcile_interval=RECONCILE_INTERVAL,
+        reconcile_interval=reconcile_interval,
         primary_lock_ttl=PRIMARY_LOCK_TTL,
         drain_timeout=DRAIN_TIMEOUT,
         warmup_sandbox_preparer=warmup_sandbox_preparer,

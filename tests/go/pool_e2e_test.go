@@ -177,6 +177,17 @@ func TestPool_RetryNextIdleSkipsStaleAndReturnsHealthyWarm(t *testing.T) {
 	eventually(t, "pool warms one real idle behind pre-injected stale entry",
 		func() bool { return snapshotIdle(pool) == 2 }, 0, 0)
 
+	// Assert the stale id is at the HEAD of the FIFO idle queue. If a future store
+	// implementation ever reordered on PutIdle, or if the reconciler somehow reaped the
+	// stale before warmup landed, we want to catch it here instead of silently taking
+	// the "healthy first" happy path and mis-calling it RETRY coverage.
+	entriesBefore, err := store.SnapshotIdleEntries(context.Background(), poolName)
+	require.NoError(t, err)
+	require.Len(t, entriesBefore, 2)
+	require.Equal(t, staleID, entriesBefore[0].SandboxID,
+		"expected stale id at idle head; got queue=%v",
+		[]string{entriesBefore[0].SandboxID, entriesBefore[1].SandboxID})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -215,11 +226,14 @@ func TestPool_RetryNextIdleThenCreateFallsThroughWhenAllStale(t *testing.T) {
 	store := opensandbox.NewInMemoryPoolStateStore()
 	poolName := "pool-" + tag
 
-	// max_idle=0 so the reconciler does not race to shrink the injected stales before we
-	// call Acquire (initial reconcile tick is delayed by ReconcileInterval when max_idle=0).
+	// Long reconcileInterval so the reconciler cannot race the acquire loop and shrink
+	// stale entries out from under the RETRY_NEXT_IDLE_THEN_CREATE path. We need the
+	// loop to actually exhaust maxAcquireRetries on stale connect failures (loopExhausted
+	// path) before falling through, not to short-circuit via "idle buffer drained".
 	pool := createTestPool(t, poolName, "owner-"+tag, store, tag, 0, &poolCreateOpts{
 		maxAcquireRetries:   3,
 		acquireReadyTimeout: 3 * time.Second,
+		reconcileInterval:   5 * time.Minute,
 	})
 
 	require.NoError(t, pool.Start(context.Background()))
@@ -254,6 +268,22 @@ func TestPool_RetryNextIdleThenCreateFallsThroughWhenAllStale(t *testing.T) {
 	require.NotNil(t, exec.ExitCode)
 	require.Equal(t, 0, *exec.ExitCode)
 	require.Contains(t, exec.Text(), "go-retry-then-create-ok")
+
+	// Under the long ReconcileInterval configured on this pool, only the acquire retry
+	// loop can pop entries from the idle queue. If the retry loop truly exhausted all
+	// 3 stale candidates before falling through to direct-create, all 3 stale ids must
+	// have been removed. If it short-circuited earlier (e.g. after a single attempt),
+	// some stale ids would remain and this assertion catches the regression.
+	remaining, err := store.SnapshotIdleEntries(context.Background(), poolName)
+	require.NoError(t, err)
+	remainingIDs := make(map[string]bool, len(remaining))
+	for _, entry := range remaining {
+		remainingIDs[entry.SandboxID] = true
+	}
+	for _, id := range staleIDs {
+		require.False(t, remainingIDs[id],
+			"retry loop did not fully exhaust stale queue; %s remained", id)
+	}
 }
 
 // TestPool_RetryNextIdleAllStaleRaisesAfterBoundedRetries verifies that
@@ -265,9 +295,13 @@ func TestPool_RetryNextIdleAllStaleRaisesAfterBoundedRetries(t *testing.T) {
 	store := opensandbox.NewInMemoryPoolStateStore()
 	poolName := "pool-" + tag
 
+	// Long reconcileInterval: prevent the reconciler from shrinking stale ids before the
+	// acquire loop can pop them. We need to prove the bound stops the loop after exactly
+	// 2 stale attempts, not that the queue happened to drain.
 	pool := createTestPool(t, poolName, "owner-"+tag, store, tag, 0, &poolCreateOpts{
 		maxAcquireRetries:   2,
 		acquireReadyTimeout: 3 * time.Second,
+		reconcileInterval:   5 * time.Minute,
 	})
 
 	require.NoError(t, pool.Start(context.Background()))

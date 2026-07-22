@@ -1253,6 +1253,18 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                     Duration.ofSeconds(2),
                     () -> mixedPool.snapshot().getIdleCount() == 2);
 
+            // Assert the stale id is at the HEAD of the FIFO idle queue. If a future
+            // store implementation ever reordered on putIdle, or if the reconciler
+            // somehow reaped the stale before warmup landed, catch it here instead of
+            // silently taking the "healthy first" happy path and mis-calling it RETRY
+            // coverage.
+            List<IdleEntry> entriesBefore = mixedStore.snapshotIdleEntries(mixedPoolName);
+            assertEquals(2, entriesBefore.size());
+            assertEquals(
+                    staleId,
+                    entriesBefore.get(0).getSandboxId(),
+                    "expected stale id at idle head, got: " + entriesBefore);
+
             Sandbox sandbox =
                     mixedPool.acquire(Duration.ofMinutes(5), AcquirePolicy.RETRY_NEXT_IDLE);
             borrowed.add(sandbox);
@@ -1353,7 +1365,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                 assertNotEquals(id, sandbox.getId(), "acquired sandbox must not be any stale id");
             }
             assertTrue(sandbox.isHealthy());
-
             Execution result =
                     sandbox.commands()
                             .run(
@@ -1363,6 +1374,21 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
             assertNull(result.getError());
             assertEquals(
                     "kotlin-retry-then-create-ok", result.getLogs().getStdout().get(0).getText());
+
+            // Under the long reconcileInterval configured on this pool, only the acquire
+            // retry loop can pop entries from the idle queue. If the retry loop truly
+            // exhausted all 3 stale candidates before falling through to direct-create,
+            // all 3 stale ids must have been removed. If it short-circuited earlier
+            // (e.g. after a single attempt), some stale ids would remain and this
+            // assertion catches the regression.
+            List<IdleEntry> remaining = allStaleStore.snapshotIdleEntries(allStalePoolName);
+            Set<String> remainingIds =
+                    remaining.stream().map(IdleEntry::getSandboxId).collect(Collectors.toSet());
+            for (String id : staleIds) {
+                assertFalse(
+                        remainingIds.contains(id),
+                        "retry loop did not fully exhaust stale queue; " + id + " remained");
+            }
         } finally {
             try {
                 allStalePool.releaseAllIdle();
