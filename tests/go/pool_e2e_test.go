@@ -145,6 +145,158 @@ func TestPool_StaleIdleFallbackShutdownRestartSnapshot(t *testing.T) {
 	}
 }
 
+// TestPool_RetryNextIdleSkipsStaleAndReturnsHealthyWarm verifies that AcquirePolicyRetryNextIdle
+// pops and discards a stale idle candidate, then returns the next healthy warm sandbox in the
+// FIFO idle queue.
+//
+// Real-world scenario: the pool's idle queue holds a stale entry ahead of a healthy warm
+// sandbox — e.g. a leftover after a control-plane blip that killed the remote sandbox but
+// left its id in the shared idle queue, or a slow-cold-starting custom template that fails
+// its first ready-check. The caller wants a warm sandbox and is willing to skip a bounded
+// number of bad candidates before giving up.
+//
+// Setup: pre-inject one stale id into the store before Start() so FIFO ordering guarantees
+// it sits ahead of the real idle the reconciler creates to reach maxIdle=2. The pool then
+// holds steady at IdleCount=2=[stale, real], neither shrinking nor rewarming.
+func TestPool_RetryNextIdleSkipsStaleAndReturnsHealthyWarm(t *testing.T) {
+	tag := poolTag("go-pool-retry-next-idle")
+	store := opensandbox.NewInMemoryPoolStateStore()
+	poolName := "pool-" + tag
+
+	staleID := fmt.Sprintf("stale-%d", time.Now().UnixNano())
+	require.NoError(t, store.PutIdle(context.Background(), poolName, staleID))
+
+	pool := createTestPool(t, poolName, "owner-"+tag, store, tag, 2, &poolCreateOpts{
+		maxAcquireRetries:   3,
+		acquireReadyTimeout: 5 * time.Second,
+	})
+
+	require.NoError(t, pool.Start(context.Background()))
+	t.Cleanup(func() { cleanupPool(pool); cleanupTaggedSandboxes(t, tag) })
+
+	eventually(t, "pool warms one real idle behind pre-injected stale entry",
+		func() bool { return snapshotIdle(pool) == 2 }, 0, 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	sb, err := pool.Acquire(ctx, opensandbox.AcquireOptions{
+		SandboxTimeout: 5 * time.Minute,
+		Policy:         policyPtr(opensandbox.AcquirePolicyRetryNextIdle),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sb.Kill(context.Background()); _ = sb.Close() })
+
+	require.NotEqual(t, staleID, sb.ID(), "acquired sandbox must not be the stale id")
+	require.True(t, sb.IsHealthy(ctx), "acquired sandbox should be healthy")
+
+	exec, err := sb.RunCommand(ctx, "echo go-retry-next-idle-ok", nil)
+	require.NoError(t, err)
+	require.NotNil(t, exec.ExitCode)
+	require.Equal(t, 0, *exec.ExitCode)
+	require.Contains(t, exec.Text(), "go-retry-next-idle-ok")
+
+	// Stale id must not silently reappear in the idle queue.
+	entries, err := store.SnapshotIdleEntries(context.Background(), poolName)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		require.NotEqual(t, staleID, entry.SandboxID, "stale id should have been removed by retry loop")
+	}
+}
+
+// TestPool_RetryNextIdleThenCreateFallsThroughWhenAllStale verifies that
+// AcquirePolicyRetryNextIdleThenCreate exhausts the retry budget on stale idle entries and
+// then falls through to direct-create so the caller still gets a working sandbox.
+//
+// Real-world scenario: after a network flap every warm sandbox is unreachable; the caller
+// cannot afford to wait for reconcile to drain them and still needs a working sandbox.
+func TestPool_RetryNextIdleThenCreateFallsThroughWhenAllStale(t *testing.T) {
+	tag := poolTag("go-pool-retry-then-create")
+	store := opensandbox.NewInMemoryPoolStateStore()
+	poolName := "pool-" + tag
+
+	// max_idle=0 so the reconciler does not race to shrink the injected stales before we
+	// call Acquire (initial reconcile tick is delayed by ReconcileInterval when max_idle=0).
+	pool := createTestPool(t, poolName, "owner-"+tag, store, tag, 0, &poolCreateOpts{
+		maxAcquireRetries:   3,
+		acquireReadyTimeout: 3 * time.Second,
+	})
+
+	require.NoError(t, pool.Start(context.Background()))
+	t.Cleanup(func() { cleanupPool(pool); cleanupTaggedSandboxes(t, tag) })
+
+	staleIDs := []string{
+		fmt.Sprintf("stale-a-%d", time.Now().UnixNano()),
+		fmt.Sprintf("stale-b-%d", time.Now().UnixNano()),
+		fmt.Sprintf("stale-c-%d", time.Now().UnixNano()),
+	}
+	for _, id := range staleIDs {
+		require.NoError(t, store.PutIdle(context.Background(), poolName, id))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	sb, err := pool.Acquire(ctx, opensandbox.AcquireOptions{
+		SandboxTimeout: 5 * time.Minute,
+		Policy:         policyPtr(opensandbox.AcquirePolicyRetryNextIdleThenCreate),
+	})
+	require.NoError(t, err, "retry-then-create should fall through to direct create")
+	t.Cleanup(func() { _ = sb.Kill(context.Background()); _ = sb.Close() })
+
+	for _, id := range staleIDs {
+		require.NotEqual(t, id, sb.ID(), "acquired sandbox must not be any stale id")
+	}
+	require.True(t, sb.IsHealthy(ctx))
+
+	exec, err := sb.RunCommand(ctx, "echo go-retry-then-create-ok", nil)
+	require.NoError(t, err)
+	require.NotNil(t, exec.ExitCode)
+	require.Equal(t, 0, *exec.ExitCode)
+	require.Contains(t, exec.Text(), "go-retry-then-create-ok")
+}
+
+// TestPool_RetryNextIdleAllStaleRaisesAfterBoundedRetries verifies that
+// AcquirePolicyRetryNextIdle respects the maxAcquireRetries bound and raises
+// PoolAcquireFailedError without falling through to direct-create when every candidate
+// is stale.
+func TestPool_RetryNextIdleAllStaleRaisesAfterBoundedRetries(t *testing.T) {
+	tag := poolTag("go-pool-retry-raise")
+	store := opensandbox.NewInMemoryPoolStateStore()
+	poolName := "pool-" + tag
+
+	pool := createTestPool(t, poolName, "owner-"+tag, store, tag, 0, &poolCreateOpts{
+		maxAcquireRetries:   2,
+		acquireReadyTimeout: 3 * time.Second,
+	})
+
+	require.NoError(t, pool.Start(context.Background()))
+	t.Cleanup(func() { cleanupPool(pool); cleanupTaggedSandboxes(t, tag) })
+
+	// Inject more stales than the retry budget so we can also assert the loop stops at the
+	// bound instead of draining the whole queue.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, store.PutIdle(context.Background(),
+			poolName, fmt.Sprintf("stale-%d-%d", i, time.Now().UnixNano())))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
+
+	_, err := pool.Acquire(ctx, opensandbox.AcquireOptions{
+		SandboxTimeout: 5 * time.Minute,
+		Policy:         policyPtr(opensandbox.AcquirePolicyRetryNextIdle),
+	})
+	var acquireFailed *opensandbox.PoolAcquireFailedError
+	require.True(t, errors.As(err, &acquireFailed),
+		"expected PoolAcquireFailedError, got %T: %v", err, err)
+
+	// RETRY_NEXT_IDLE must not fall through to direct-create, so no tagged sandbox should
+	// have been created.
+	assert.Equal(t, 0, countTaggedSandboxes(t, tag),
+		"RETRY_NEXT_IDLE must not fall through to direct-create")
+}
+
 func TestPool_LifecycleIdempotencyResizeRewarm(t *testing.T) {
 	tag := poolTag("go-pool")
 	store := opensandbox.NewInMemoryPoolStateStore()
@@ -519,8 +671,10 @@ func TestRedisPool_CrossNodeAcquireResizeDirectCreate(t *testing.T) {
 	poolA := createTestPool(t, poolName, "owner-a-"+tag, storeA, tag, poolMaxIdle, nil)
 	poolB := createTestPool(t, poolName, "owner-b-"+tag, storeB, tag, poolMaxIdle, nil)
 	t.Cleanup(func() {
-		cleanupPool(poolA); cleanupPool(poolB)
-		cleanupTaggedSandboxes(t, tag); cleanupRedisKeys(t, rdb, prefix)
+		cleanupPool(poolA)
+		cleanupPool(poolB)
+		cleanupTaggedSandboxes(t, tag)
+		cleanupRedisKeys(t, rdb, prefix)
 	})
 
 	require.NoError(t, poolA.Start(context.Background()))
@@ -578,8 +732,10 @@ func TestRedisPool_PrimaryFailoverRestart(t *testing.T) {
 	poolB := createTestPool(t, poolName, ownerB, storeB, tag, 1, nil)
 	lockKey := storeA.PrimaryLockKey(poolName)
 	t.Cleanup(func() {
-		cleanupPool(poolA); cleanupPool(poolB)
-		cleanupTaggedSandboxes(t, tag); cleanupRedisKeys(t, rdb, prefix)
+		cleanupPool(poolA)
+		cleanupPool(poolB)
+		cleanupTaggedSandboxes(t, tag)
+		cleanupRedisKeys(t, rdb, prefix)
 	})
 
 	ctx := context.Background()
@@ -625,7 +781,9 @@ func TestRedisPool_RestartOverwritesStaleMaxIdle(t *testing.T) {
 	storeA := newRedisE2EStore(t, rdb, prefix)
 	poolA := createTestPool(t, poolName, "owner-a-"+tag, storeA, tag, 1, nil)
 	t.Cleanup(func() {
-		cleanupPool(poolA); cleanupTaggedSandboxes(t, tag); cleanupRedisKeys(t, rdb, prefix)
+		cleanupPool(poolA)
+		cleanupTaggedSandboxes(t, tag)
+		cleanupRedisKeys(t, rdb, prefix)
 	})
 
 	ctx := context.Background()
@@ -661,8 +819,10 @@ func TestRedisPool_SecondaryResizeAppliedByPrimary(t *testing.T) {
 	poolB := createTestPool(t, poolName, "owner-b-"+tag, storeB, tag, 2, nil)
 	lockKey := storeA.PrimaryLockKey(poolName)
 	t.Cleanup(func() {
-		cleanupPool(poolA); cleanupPool(poolB)
-		cleanupTaggedSandboxes(t, tag); cleanupRedisKeys(t, rdb, prefix)
+		cleanupPool(poolA)
+		cleanupPool(poolB)
+		cleanupTaggedSandboxes(t, tag)
+		cleanupRedisKeys(t, rdb, prefix)
 	})
 
 	ctx := context.Background()
@@ -700,8 +860,10 @@ func TestRedisPool_ConcurrentCrossNodeAcquireAtomicTake(t *testing.T) {
 	poolA := createTestPool(t, poolName, "owner-a-"+tag, storeA, tag, poolMaxIdle, nil)
 	poolB := createTestPool(t, poolName, "owner-b-"+tag, storeB, tag, poolMaxIdle, nil)
 	t.Cleanup(func() {
-		cleanupPool(poolA); cleanupPool(poolB)
-		cleanupTaggedSandboxes(t, tag); cleanupRedisKeys(t, rdb, prefix)
+		cleanupPool(poolA)
+		cleanupPool(poolB)
+		cleanupTaggedSandboxes(t, tag)
+		cleanupRedisKeys(t, rdb, prefix)
 	})
 
 	ctx := context.Background()
@@ -811,8 +973,10 @@ func TestRedisPool_ConcurrentAcquireResizeJitter(t *testing.T) {
 	poolA := createTestPool(t, poolName, "owner-a-"+tag, storeA, tag, poolMaxIdle, nil)
 	poolB := createTestPool(t, poolName, "owner-b-"+tag, storeB, tag, poolMaxIdle, nil)
 	t.Cleanup(func() {
-		cleanupPool(poolA); cleanupPool(poolB)
-		cleanupTaggedSandboxes(t, tag); cleanupRedisKeys(t, rdb, prefix)
+		cleanupPool(poolA)
+		cleanupPool(poolB)
+		cleanupTaggedSandboxes(t, tag)
+		cleanupRedisKeys(t, rdb, prefix)
 	})
 
 	ctx := context.Background()
@@ -886,8 +1050,10 @@ func TestRedisPool_StaleIdleRemovedAndDirectCreateFallback(t *testing.T) {
 	poolA := createTestPool(t, poolName, "owner-a-"+tag, storeA, tag, 0, nil)
 	poolB := createTestPool(t, poolName, "owner-b-"+tag, storeB, tag, 0, nil)
 	t.Cleanup(func() {
-		cleanupPool(poolA); cleanupPool(poolB)
-		cleanupTaggedSandboxes(t, tag); cleanupRedisKeys(t, rdb, prefix)
+		cleanupPool(poolA)
+		cleanupPool(poolB)
+		cleanupTaggedSandboxes(t, tag)
+		cleanupRedisKeys(t, rdb, prefix)
 	})
 
 	ctx := context.Background()
